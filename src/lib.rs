@@ -1841,13 +1841,18 @@ impl TestDriver {
     }
 
     /// Start watching for anything the page throws.
+    ///
+    /// The listener is installed by a script that keeps its names to itself,
+    /// so it neither collides with the page's globals nor claims any the page
+    /// declares later. It marks the body `data-watching` once it is in place,
+    /// and this fails if that mark does not appear, since a watch that never
+    /// started would let every throw pass unheard.
     pub async fn watch_for_errors(&self) -> Result<()> {
         tracing::trace!("Listening for uncaught errors in the page");
 
         let script = "if (!document.body.hasAttribute('data-watching')) { \
-                 document.body.setAttribute('data-watching', ''); \
                  const inject = document.createElement('script'); \
-                 inject.textContent = `\
+                 inject.textContent = `(() => { \
                      const say = what => document.body.setAttribute( \
                          'data-threw', String(what).slice(0, 6000)); \
                      window.addEventListener('error', e => say( \
@@ -1855,12 +1860,19 @@ impl TestDriver {
                      window.addEventListener('unhandledrejection', e => say(e.reason)); \
                      const was = console.error; \
                      console.error = (...a) => { say(a.join(' ')); was(...a); }; \
-                 `; \
+                     document.body.setAttribute('data-watching', ''); \
+                 })();`; \
                  document.documentElement.appendChild(inject); \
                  inject.remove(); \
-             }";
+             } \
+             return document.body.hasAttribute('data-watching');";
 
-        self.inner.execute(script, Vec::new()).await?;
+        let watching = self.inner.execute(script, Vec::new()).await?;
+
+        ensure!(
+            watching.json().as_bool() == Some(true),
+            "the script that watches the page for errors did not run"
+        );
         Ok(())
     }
 

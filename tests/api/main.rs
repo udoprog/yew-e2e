@@ -58,6 +58,7 @@ const PAGES: &[&Page] = &[
     &navigation::PAGE,
     &pointer::PAGE,
     &scripts::PAGE,
+    &scripts::COLLIDE,
     &scroll::PAGE,
     &storage::PAGE,
     &style::PAGE,
@@ -86,9 +87,6 @@ body {{ font: 16px sans-serif; }}
 {body}
 <ol data-test="log"></ol>
 <script>
-// Not `say`: `watch_for_errors` declares a global `say` of its own, and a
-// second one is a redeclaration that stops its script; see card
-// 8ff8a67d.
 const record = line => {{
     const item = document.createElement("li");
     item.textContent = line;
@@ -383,6 +381,7 @@ mod suite {
         scripts::{
             watch_for_errors_hears_a_throw,
             watch_for_errors_hears_a_rejection,
+            watch_for_errors_keeps_out_of_the_page_globals,
             capture_clipboard_and_wait_copied,
             delay_websocket_sends_patches_and_restores_send,
             watch_mutations_counts_changes,

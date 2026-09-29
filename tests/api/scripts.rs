@@ -17,6 +17,7 @@ pub const PAGE: Page = Page {
 <button data-test="mutate">Mutate</button>
 <button data-test="redraw">Redraw</button>
 <button data-test="remove">Remove</button>
+<button data-test="declare">Declare</button>
 <div data-test="watched"><span class="leaf">leaf</span><canvas width="10" height="10"></canvas></div>
 "##,
     script: r##"
@@ -34,6 +35,26 @@ on("mutate", () => {
 });
 on("redraw", () => watched.querySelector("canvas").getContext("2d").clearRect(0, 0, 10, 10));
 on("remove", () => watched.remove());
+on("declare", () => {
+    const script = document.createElement("script");
+    script.textContent = "const say = 'said'; const was = 'was'; record(`declared ${say} ${was}`);";
+    document.body.append(script);
+});
+"##,
+};
+
+/// A page whose own globals have the names the error watcher uses inside.
+pub const COLLIDE: Page = Page {
+    name: "collide",
+    body: r##"
+<button data-test="reject">Reject</button>
+"##,
+    script: r##"
+const say = "the page's say";
+let was = "the page's was";
+document.querySelector("[data-test=reject]").addEventListener("click", () => {
+    Promise.reject(`collided with ${say} and ${was}`);
+});
 "##,
 };
 
@@ -99,6 +120,22 @@ pub async fn watch_for_errors_hears_a_rejection(
     driver.press_nth("[data-test=reject]", 0).await?;
     threw(driver, "nope").await?;
     forget_the_throw(driver).await
+}
+
+pub async fn watch_for_errors_keeps_out_of_the_page_globals(
+    driver: &mut TestDriver,
+    pages: &mut Pages,
+) -> Result<()> {
+    // A page with globals of the watcher's names is still watched.
+    pages.open(driver, &COLLIDE).await?;
+    driver.press_nth("[data-test=reject]", 0).await?;
+    threw(driver, "collided with the page's say and the page's was").await?;
+    forget_the_throw(driver).await?;
+
+    // And a page that declares them once it is watched still can.
+    pages.open(driver, &PAGE).await?;
+    driver.press_nth("[data-test=declare]", 0).await?;
+    logged_exactly(driver, ["declared said was"]).await
 }
 
 pub async fn capture_clipboard_and_wait_copied(
