@@ -12,7 +12,7 @@ readme = "README.md"
 homepage = "https://github.com/udoprog/yew-e2e"
 repository = "https://github.com/udoprog/yew-e2e"
 license = "MIT OR Apache-2.0"
-keywords = ["e2e", "testing", "webdriver", "yew", "browser"]
+keywords = ["browser", "e2e", "testing", "webdriver", "yew"]
 categories = ["development-tools::testing", "wasm", "web-programming"]
 
 [dependencies]
