@@ -84,7 +84,10 @@ impl Drop for OwnedProcess {
 /// A browser this suite knows how to drive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Engine {
+    /// Firefox, driven through `geckodriver`.
     Firefox,
+    /// Chrome, driven through `chromedriver`, which is fetched to match the
+    /// installed Chrome when none is on the `PATH`.
     Chrome,
 }
 

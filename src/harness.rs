@@ -93,6 +93,7 @@ impl<F: Fixture> Default for Suite<F> {
 }
 
 impl<F: Fixture> Suite<F> {
+    /// An empty suite, configured by [`Fixture::config`].
     #[inline]
     pub fn new() -> Self {
         Self {

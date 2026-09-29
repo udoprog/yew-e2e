@@ -164,6 +164,9 @@
 //! [Trunk]: https://trunkrs.dev
 //! [Yew]: https://yew.rs
 
+#![warn(missing_docs)]
+#![deny(rustdoc::broken_intra_doc_links)]
+
 use std::fmt::Write;
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
@@ -192,6 +195,16 @@ pub use self::driver::Engine;
 
 use self::driver::{Driver, QUIT_TIMEOUT, STARTUP_TIMEOUT, with_cleanup};
 
+/// What a test file needs in scope, in one `use yew_e2e::prelude::*;`.
+///
+/// That is [`anyhow`](mod@anyhow)'s [`Result`] and error macros, the whole of
+/// `thirtyfour`'s prelude (among it [`By`], [`Key`] and [`WebDriver`]), and
+/// the [`TestDriver`] and [`TestElement`] a test is handed.
+///
+/// [`Result`]: anyhow::Result
+/// [`By`]: thirtyfour::By
+/// [`Key`]: thirtyfour::Key
+/// [`WebDriver`]: thirtyfour::WebDriver
 pub mod prelude {
     pub use anyhow::{Context, Result, anyhow, bail, ensure};
     pub use thirtyfour::prelude::*;
@@ -1305,6 +1318,11 @@ impl TestElement {
         Ok(())
     }
 
+    /// Whether the element is displayed, as WebDriver judges it: present in
+    /// the page is not enough, it must also not be hidden by CSS
+    /// (`display: none`, `visibility: hidden`) or have no size.
+    ///
+    /// Answers once, at the time of asking; it does not wait.
     pub async fn visible(&self) -> Result<bool> {
         Ok(self.inner.is_displayed().await?)
     }
@@ -1615,8 +1633,10 @@ impl TestDriver {
             .collect())
     }
 
-    /// Turn the wheel over an element.
     /// **Turn the wheel and report whether anything consumed it.**
+    ///
+    /// Dispatches the same event as [`Self::wheel`], and returns `true` when a
+    /// listener called `preventDefault()` on it.
     pub async fn wheel_consumed(&self, element: &TestElement, delta: f64) -> Result<bool> {
         tracing::trace!(delta, "Turning the wheel and asking who took it");
 
@@ -1633,6 +1653,13 @@ impl TestDriver {
         Ok(taken.json().as_bool().unwrap_or(false))
     }
 
+    /// Turn the wheel over an element: a cancelable, bubbling `wheel` event
+    /// with `deltaY` set to `delta` (positive scrolls down), dispatched on it.
+    ///
+    /// The event is synthesized in the page rather than sent through
+    /// WebDriver, so it reaches the element's listeners but the browser does
+    /// not scroll anything by itself. Returns once the event is dispatched;
+    /// see [`Self::wheel_consumed`] to learn whether anything handled it.
     pub async fn wheel(&self, element: &TestElement, delta: f64) -> Result<()> {
         tracing::trace!(delta, "Turning the wheel over an element");
 
@@ -1727,6 +1754,10 @@ impl TestDriver {
     }
 
     /// Capture clipboard writes in this page without accessing the system clipboard.
+    ///
+    /// Replaces `navigator.clipboard.writeText` so the text it is handed is
+    /// kept on the page instead, where [`Self::wait_copied`] reads it. Lasts
+    /// until the page is next loaded.
     pub async fn capture_clipboard(&self) -> Result<()> {
         self.inner
             .execute(
@@ -1741,7 +1772,9 @@ impl TestDriver {
         Ok(())
     }
 
-    /// Delay requests on the existing socket so dispatch feedback is observable.
+    /// Delay every `WebSocket` send in this page by `millis`, so what the page
+    /// shows while a request is in flight can be observed. Lasts until
+    /// [`Self::stop_delaying_websocket_sends`] or the page is next loaded.
     ///
     /// This defers the call into the real `WebSocket.send`, which means it
     /// must not defer with the caller's own bytes: `send_with_u8_array` hands
@@ -1798,7 +1831,8 @@ impl TestDriver {
         Ok(())
     }
 
-    /// Wait for the copy affordance to pass the complete text to the clipboard API.
+    /// Wait until the text last written to the clipboard since
+    /// [`Self::capture_clipboard`] is exactly `text`.
     pub async fn wait_copied(&self, text: &str) -> Result<()> {
         self.wait_until("the full text to be copied", async || {
             Ok(self.find_one_by("body").await?.attr("data-copied").await? == text)
@@ -2123,8 +2157,12 @@ impl TestDriver {
         Ok(value.json().as_str().unwrap_or_default().trim().to_string())
     }
 
-    /// Run the attention regressions with E2E_MOTION=reduce or normal on Firefox
-    /// to exercise the browser's media preference, not a replacement stylesheet.
+    /// Whether the page matches `prefers-reduced-motion: reduce`.
+    ///
+    /// Where `E2E_MOTION` is set this is an error when the browser disagrees
+    /// with it, so a run meant to exercise one preference cannot quietly get
+    /// the other. Set it (Firefox only) to test the browser's own media
+    /// preference rather than a replacement stylesheet.
     pub async fn reduced_motion(&self) -> Result<bool> {
         let value = self
             .inner
@@ -2658,6 +2696,7 @@ impl TestDriver {
         Ok(())
     }
 
+    /// Let go of a key held with [`Self::hold_key`].
     pub async fn release_key(&self, key: char) -> Result<()> {
         self.inner.action_chain().key_up(key).perform().await?;
         Ok(())
@@ -2804,6 +2843,11 @@ impl TestDriver {
         Ok(())
     }
 
+    /// One attribute of whatever element has keyboard focus, or `None` when
+    /// it has no such attribute. Where nothing is focused, that is the
+    /// document's `<body>`.
+    ///
+    /// Answers once, at the time of asking; it does not wait.
     pub async fn focused_attr(&self, name: &str) -> Result<Option<String>> {
         let found = self
             .inner
@@ -2822,7 +2866,32 @@ impl TestDriver {
     common!();
 }
 
+/// **Anything that names elements to find**, taken by every lookup on
+/// [`TestDriver`] that says `by`.
+///
+/// A string (`&str` or `&String`) is a CSS selector; any other way of finding
+/// elements is written out as a [`By`].
+///
+/// # Examples
+///
+/// ```no_run
+/// use yew_e2e::prelude::*;
+///
+/// async fn lookups(driver: &TestDriver) -> Result<()> {
+///     // A CSS selector.
+///     driver.wait_count("li.item", 3).await?;
+///
+///     // One that was built rather than written out.
+///     let id = 7;
+///     driver.find_one_by(&format!("[data-test=row-{id}]")).await?;
+///
+///     // Any other `By`.
+///     driver.find_first(By::XPath("//button[text()='Save']")).await?;
+///     Ok(())
+/// }
+/// ```
 pub trait IntoBy {
+    /// The [`By`] this names.
     fn into_by(self) -> By;
 }
 
