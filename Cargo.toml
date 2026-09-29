@@ -41,3 +41,10 @@ libc = "0.2.174"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util"] }
+
+# The public TestDriver and TestElement API against pages of its own; skips
+# itself on a machine with no browser to drive.
+[[test]]
+name = "api"
+path = "tests/api/main.rs"
+harness = false
