@@ -394,12 +394,14 @@ async fn drive<F: Fixture>(tests: Vec<Test<F>>, options: &Options) -> Result<boo
     }
 
     if !ok {
-        match std::env::var("CARGO_PKG_NAME") {
-            Ok(package) => {
-                println!("run the rest with: cargo test -p {package} -- --last-session")
-            }
-            Err(_) => println!("run the rest with: {} --last-session", program()),
-        }
+        let package = std::env::var("CARGO_PKG_NAME").ok();
+        let exe = std::env::current_exe()
+            .ok()
+            .or_else(|| std::env::args_os().next().map(std::path::PathBuf::from));
+        println!(
+            "run the rest with: {}",
+            rerun_hint(package.as_deref(), exe.as_deref())
+        );
     }
 
     Ok(ok)
@@ -1059,6 +1061,114 @@ fn program() -> String {
         .and_then(|path| path.file_name())
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| String::from("e2e"))
+}
+
+/// The command that reruns only what did not pass in this run's session.
+///
+/// A suite is one target of its package, so a bare `cargo test -p` would
+/// hand `--last-session` to every other test binary as well -- the lib's
+/// libtest among them, which rejects it. The target is read back from where
+/// cargo put the executable: an integration test lands in `deps` as
+/// `<name>-<hash>`, and an example in `examples`, as `<name>-<hash>` when
+/// built by `cargo test` and as a bare `<name>` when built by `cargo run`.
+/// When neither holds, or cargo did not start this run, the executable itself
+/// is the one command sure to run this suite and nothing else.
+fn rerun_hint(package: Option<&str>, exe: Option<&std::path::Path>) -> String {
+    const FLAG: &str = "--last-session";
+
+    let Some(exe) = exe else {
+        return format!("{} {FLAG}", program());
+    };
+
+    let kind = exe
+        .parent()
+        .and_then(|dir| dir.file_name())
+        .and_then(|dir| dir.to_str());
+
+    let target = exe
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .map(strip_hash)
+        .filter(|name| !name.is_empty());
+
+    match (package, kind, target) {
+        (Some(package), Some("deps"), Some(target)) => {
+            format!("cargo test -p {package} --test {target} -- {FLAG}")
+        }
+        (Some(package), Some("examples"), Some(target)) => {
+            format!("cargo run -p {package} --example {target} -- {FLAG}")
+        }
+        _ => format!("{} {FLAG}", exe.display()),
+    }
+}
+
+/// `name` without the `-<hash>` cargo appends to what it builds: sixteen
+/// lowercase hex digits. Anything else after the last `-` is part of the name.
+fn strip_hash(name: &str) -> &str {
+    match name.rsplit_once('-') {
+        Some((base, hash))
+            if !base.is_empty()
+                && hash.len() == 16
+                && hash.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) =>
+        {
+            base
+        }
+        _ => name,
+    }
+}
+
+#[cfg(test)]
+mod rerun_hint_tests {
+    use std::path::Path;
+
+    use super::{rerun_hint, strip_hash};
+
+    #[test]
+    fn strips_only_a_cargo_hash() {
+        assert_eq!(strip_hash("api-5d4aace97df90d4a"), "api");
+        assert_eq!(strip_hash("my-suite-5d4aace97df90d4a"), "my-suite");
+        assert_eq!(strip_hash("static_page"), "static_page");
+        assert_eq!(strip_hash("my-suite"), "my-suite");
+        assert_eq!(strip_hash("api-5D4AACE97DF90D4A"), "api-5D4AACE97DF90D4A");
+        assert_eq!(strip_hash("-5d4aace97df90d4a"), "-5d4aace97df90d4a");
+    }
+
+    #[test]
+    fn an_integration_test_is_named_with_test() {
+        let exe = Path::new("/w/target/debug/deps/api-5d4aace97df90d4a");
+        assert_eq!(
+            rerun_hint(Some("yew-e2e"), Some(exe)),
+            "cargo test -p yew-e2e --test api -- --last-session"
+        );
+    }
+
+    #[test]
+    fn an_example_is_run_with_cargo_run() {
+        for exe in [
+            "/w/target/debug/examples/static_page",
+            "/w/target/debug/examples/static_page-9cde5bb8f39ff32d",
+        ] {
+            assert_eq!(
+                rerun_hint(Some("yew-e2e"), Some(Path::new(exe))),
+                "cargo run -p yew-e2e --example static_page -- --last-session"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unknown_target_reruns_the_executable() {
+        let exe = Path::new("/w/target/debug/app-e2e");
+        assert_eq!(
+            rerun_hint(Some("app"), Some(exe)),
+            "/w/target/debug/app-e2e --last-session"
+        );
+
+        let exe = Path::new("/w/target/debug/deps/api-5d4aace97df90d4a");
+        assert_eq!(
+            rerun_hint(None, Some(exe)),
+            "/w/target/debug/deps/api-5d4aace97df90d4a --last-session"
+        );
+    }
 }
 
 /// What the run was asked for.
