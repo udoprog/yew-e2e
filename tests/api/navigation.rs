@@ -155,10 +155,7 @@ pub async fn in_second_tab_fails_on_what_the_page_threw(
 
     let said = format!("{error:#}");
     ensure!(
-        said.contains("the page threw")
-            && (said.contains("thrown in the second tab")
-                // Firefox says where, not what; see card 52a92fd9.
-                || said.contains(&format!("{}:", pages.address("navigation")))),
+        said.contains("the page threw") && said.contains("thrown in the second tab"),
         "the second tab's failure said {said:?}"
     );
     ensure!(

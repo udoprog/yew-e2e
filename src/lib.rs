@@ -1847,6 +1847,9 @@ impl TestDriver {
     /// declares later. It marks the body `data-watching` once it is in place,
     /// and this fails if that mark does not appear, since a watch that never
     /// started would let every throw pass unheard.
+    ///
+    /// What it records for a thrown error is its message followed by its
+    /// stack, since some browsers (Firefox) keep only the frames in the stack.
     pub async fn watch_for_errors(&self) -> Result<()> {
         tracing::trace!("Listening for uncaught errors in the page");
 
@@ -1855,9 +1858,15 @@ impl TestDriver {
                  inject.textContent = `(() => { \
                      const say = what => document.body.setAttribute( \
                          'data-threw', String(what).slice(0, 6000)); \
-                     window.addEventListener('error', e => say( \
-                         (e.error && e.error.stack) || e.message)); \
-                     window.addEventListener('unhandledrejection', e => say(e.reason)); \
+                     const told = (thrown, otherwise) => { \
+                         if (!(thrown instanceof Error)) { return otherwise; } \
+                         const head = String(thrown); \
+                         const stack = thrown.stack || ''; \
+                         return stack.startsWith(head) ? stack : head + '\\\\n' + stack; \
+                     }; \
+                     window.addEventListener('error', e => say(told(e.error, e.message))); \
+                     window.addEventListener('unhandledrejection', \
+                         e => say(told(e.reason, e.reason))); \
                      const was = console.error; \
                      console.error = (...a) => { say(a.join(' ')); was(...a); }; \
                      document.body.setAttribute('data-watching', ''); \

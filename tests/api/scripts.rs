@@ -92,18 +92,15 @@ pub async fn watch_for_errors_hears_a_throw(
     ensure!(driver.error_seen().await?.is_none(), "a quiet page threw");
 
     driver.press_nth("[data-test=throw]", 0).await?;
-    // Firefox's `Error.stack` is only the frames, and the watcher prefers it
-    // to the message, so there a throw says where it was thrown rather than
-    // what it said; see card 52a92fd9.
-    let at = format!("{}:", pages.address("scripts"));
-    driver
-        .wait_until("the page to throw", async || {
-            Ok(driver
-                .error_seen()
-                .await?
-                .is_some_and(|threw| threw.contains("boom") || threw.contains(&at)))
-        })
-        .await?;
+    // What it said, and where it was thrown.
+    threw(driver, "Error: boom").await?;
+    ensure!(
+        driver
+            .error_seen()
+            .await?
+            .is_some_and(|threw| threw.contains(&format!("{}:", pages.address("scripts")))),
+        "the throw did not say where it was thrown"
+    );
     forget_the_throw(driver).await?;
 
     driver.press_nth("[data-test=complain]", 0).await?;
