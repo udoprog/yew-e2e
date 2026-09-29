@@ -765,6 +765,12 @@ fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> &str {
     "a payload that is neither a string nor a &str"
 }
 
+/// The first step of a drag along one axis: up to 8px towards `offset`, never
+/// past it, so that the rest of the drag moves `offset` less this.
+fn drag_nudge(offset: i64) -> i64 {
+    offset.clamp(-8, 8)
+}
+
 /// How often a pending observation is repeated.
 pub const POLL_INTERVAL: Duration = Duration::from_millis(25);
 
@@ -1223,8 +1229,14 @@ impl TestElement {
 
     /// Press on this element and drag `dx`, `dy` from where it is, **leaving
     /// the button down**.
+    ///
+    /// The pointer first steps up to 8px towards the offset, so the page sees
+    /// a drag begin, and then moves the rest of the way: it comes to rest
+    /// exactly `dx`, `dy` from where it was pressed.
     pub async fn drag_by(&self, dx: i64, dy: i64) -> Result<()> {
         tracing::trace!(dx, dy, "Dragging element");
+
+        let (nx, ny) = (drag_nudge(dx), drag_nudge(dy));
 
         self.inner.scroll_into_view().await?;
 
@@ -1233,8 +1245,8 @@ impl TestElement {
             .action_chain()
             .move_to_element_center(&self.inner)
             .click_and_hold()
-            .move_by_offset(dx.signum() * 8, dy.signum() * 8)
-            .move_by_offset(dx, dy)
+            .move_by_offset(nx, ny)
+            .move_by_offset(dx - nx, dy - ny)
             .perform()
             .await?;
 
@@ -1249,6 +1261,8 @@ impl TestElement {
     pub async fn drag_from_by(&self, at_x: i64, at_y: i64, dx: i64, dy: i64) -> Result<()> {
         tracing::trace!(at_x, at_y, dx, dy, "Dragging from a point in an element");
 
+        let (nx, ny) = (drag_nudge(dx), drag_nudge(dy));
+
         self.inner.scroll_into_view().await?;
 
         self.inner
@@ -1257,8 +1271,8 @@ impl TestElement {
             .move_to_element_center(&self.inner)
             .move_by_offset(at_x, at_y)
             .click_and_hold()
-            .move_by_offset(dx.signum() * 8, dy.signum() * 8)
-            .move_by_offset(dx, dy)
+            .move_by_offset(nx, ny)
+            .move_by_offset(dx - nx, dy - ny)
             .perform()
             .await?;
 
@@ -1269,6 +1283,8 @@ impl TestElement {
     pub async fn alt_drag_by(&self, dx: i64, dy: i64) -> Result<()> {
         tracing::trace!(dx, dy, "Dragging element with alt held");
 
+        let (nx, ny) = (drag_nudge(dx), drag_nudge(dy));
+
         self.inner.scroll_into_view().await?;
 
         self.inner
@@ -1277,8 +1293,8 @@ impl TestElement {
             .key_down(thirtyfour::Key::Alt)
             .move_to_element_center(&self.inner)
             .click_and_hold()
-            .move_by_offset(dx.signum() * 8, dy.signum() * 8)
-            .move_by_offset(dx, dy)
+            .move_by_offset(nx, ny)
+            .move_by_offset(dx - nx, dy - ny)
             .perform()
             .await?;
 

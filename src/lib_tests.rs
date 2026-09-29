@@ -282,3 +282,30 @@ mod lifecycle {
         gone(pid).await;
     }
 }
+
+#[cfg(test)]
+mod drag_nudge {
+    use crate::drag_nudge;
+
+    #[test]
+    fn steps_eight_towards_a_long_offset() {
+        assert_eq!(drag_nudge(60), 8);
+        assert_eq!(drag_nudge(-30), -8);
+    }
+
+    #[test]
+    fn never_steps_past_a_short_offset() {
+        assert_eq!(drag_nudge(5), 5);
+        assert_eq!(drag_nudge(-3), -3);
+        assert_eq!(drag_nudge(0), 0);
+    }
+
+    #[test]
+    fn never_overshoots_nor_turns_back() {
+        for offset in -20..=20 {
+            let nudge = drag_nudge(offset);
+            assert!(nudge.abs() <= offset.abs());
+            assert_eq!(nudge.signum(), offset.signum());
+        }
+    }
+}

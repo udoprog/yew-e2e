@@ -62,18 +62,6 @@ surface.addEventListener("pointercancel", () => record("cancel"));
 "##,
 };
 
-/// Where a held drag of `offset` along one axis comes to rest, from where it
-/// was pressed.
-///
-/// `drag_by`, `drag_from_by` and `alt_drag_by` say they drag `dx`, `dy`, but
-/// they first step 8px towards it and then move the whole of `dx`, `dy` on
-/// top, so they land 8px past it on every axis that moves; see card
-/// 4a1c22ae. These tests pin what they do today, so a fix changes this
-/// one function.
-fn landed(offset: i64) -> i64 {
-    offset + offset.signum() * 8
-}
-
 /// Where the surface's last move had the pointer, and which buttons it held.
 async fn held(driver: &TestDriver, expected: &str) -> Result<()> {
     driver.wait_texts("[data-test=held]", [expected]).await
@@ -215,11 +203,26 @@ pub async fn drag_by_holds_the_button_until_drop_held(
     surface.drag_by(60, 20).await?;
 
     logged_exactly(driver, ["down 0,0"]).await?;
-    held(driver, &format!("1 {},{}", landed(60), landed(20))).await?;
+    held(driver, "1 60,20").await?;
 
     driver.drop_held().await?;
-    let up = format!("up {},{}", landed(60), landed(20));
-    logged_exactly(driver, ["down 0,0", &up]).await
+    logged_exactly(driver, ["down 0,0", "up 60,20"]).await
+}
+
+/// An offset shorter than the drag's first 8px step, or none at all on one
+/// axis, still lands exactly where it says.
+pub async fn drag_by_lands_on_a_short_offset(
+    driver: &mut TestDriver,
+    pages: &mut Pages,
+) -> Result<()> {
+    pages.open(driver, &PAGE).await?;
+
+    let surface = driver.find_one_by("[data-test=surface]").await?;
+    surface.drag_by(5, 0).await?;
+    held(driver, "1 5,0").await?;
+
+    driver.drop_held().await?;
+    logged_exactly(driver, ["down 0,0", "up 5,0"]).await
 }
 
 pub async fn drag_from_by_begins_off_centre(
@@ -230,11 +233,10 @@ pub async fn drag_from_by_begins_off_centre(
 
     let surface = driver.find_one_by("[data-test=surface]").await?;
     surface.drag_from_by(-50, 10, -30, 0).await?;
-    held(driver, &format!("1 {},10", -50 + landed(-30))).await?;
+    held(driver, "1 -80,10").await?;
 
     driver.drop_held().await?;
-    let up = format!("up {},10", -50 + landed(-30));
-    logged_exactly(driver, ["down -50,10", &up]).await
+    logged_exactly(driver, ["down -50,10", "up -80,10"]).await
 }
 
 pub async fn move_held_carries_the_held_drag(
@@ -245,14 +247,13 @@ pub async fn move_held_carries_the_held_drag(
 
     let surface = driver.find_one_by("[data-test=surface]").await?;
     surface.drag_by(40, 0).await?;
-    held(driver, &format!("1 {},0", landed(40))).await?;
+    held(driver, "1 40,0").await?;
 
     driver.move_held(0, 30).await?;
-    held(driver, &format!("1 {},30", landed(40))).await?;
+    held(driver, "1 40,30").await?;
 
     driver.drop_held().await?;
-    let up = format!("up {},30", landed(40));
-    logged_exactly(driver, ["down 0,0", &up]).await
+    logged_exactly(driver, ["down 0,0", "up 40,30"]).await
 }
 
 pub async fn alt_drag_by_holds_alt_until_drop_held_alt(
@@ -266,8 +267,7 @@ pub async fn alt_drag_by_holds_alt_until_drop_held_alt(
     logged_exactly(driver, ["down 0,0 alt"]).await?;
 
     driver.drop_held_alt().await?;
-    let up = format!("up 0,{} alt", landed(50));
-    logged_exactly(driver, ["down 0,0 alt", &up]).await?;
+    logged_exactly(driver, ["down 0,0 alt", "up 0,50 alt"]).await?;
 
     // Alt was given back along with the button.
     surface.click().await?;
@@ -287,11 +287,10 @@ pub async fn cancel_pointer_cancels_without_releasing(
     logged_exactly(driver, ["down 0,0", "cancel"]).await?;
 
     driver.move_held(10, 0).await?;
-    held(driver, &format!("1 {},0", landed(20) + 10)).await?;
+    held(driver, "1 30,0").await?;
 
     driver.drop_held().await?;
-    let up = format!("up {},0", landed(20) + 10);
-    logged_exactly(driver, ["down 0,0", "cancel", &up]).await
+    logged_exactly(driver, ["down 0,0", "cancel", "up 30,0"]).await
 }
 
 pub async fn release_all_input_lets_go_of_a_drag(
@@ -305,8 +304,7 @@ pub async fn release_all_input_lets_go_of_a_drag(
     logged_exactly(driver, ["down 0,0"]).await?;
 
     driver.release_all_input().await?;
-    let up = format!("up {},0", landed(-20));
-    logged_exactly(driver, ["down 0,0", &up]).await
+    logged_exactly(driver, ["down 0,0", "up -20,0"]).await
 }
 
 pub async fn middle_drag_by_pans_with_the_middle_button(

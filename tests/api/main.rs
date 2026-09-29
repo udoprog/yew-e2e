@@ -337,6 +337,7 @@ mod suite {
             press_nth_presses_by_index,
             context_press_nth_right_clicks_by_index,
             drag_by_holds_the_button_until_drop_held,
+            drag_by_lands_on_a_short_offset,
             drag_from_by_begins_off_centre,
             move_held_carries_the_held_drag,
             alt_drag_by_holds_alt_until_drop_held_alt,
