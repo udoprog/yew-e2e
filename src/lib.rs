@@ -2852,11 +2852,9 @@ impl TestDriver {
         let found = self
             .inner
             .execute(
-                &format!(
-                    "return document.activeElement \
-                     && document.activeElement.getAttribute('{name}')"
-                ),
-                Vec::new(),
+                "return document.activeElement \
+                 && document.activeElement.getAttribute(arguments[0])",
+                vec![serde_json::json!(name)],
             )
             .await?;
 
