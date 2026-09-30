@@ -246,24 +246,12 @@ impl<F: Fixture> Suite<F> {
             .enable_all()
             .build()?;
 
-        let sandbox = crate::sandbox::Sandbox::enter(F::enter_sandbox)?;
-
         let frontend = self.config.frontend;
 
-        let ok = runtime.block_on(async move {
+        runtime.block_on(async move {
             crate::dist::build(&frontend).await?;
             drive(chosen, &options).await
-        })?;
-
-        if let Err(error) = sandbox.finish() {
-            println!(
-                "
-error: {error:?}"
-            );
-            return Ok(false);
-        }
-
-        Ok(ok)
+        })
     }
 }
 

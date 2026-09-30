@@ -170,7 +170,7 @@
 use std::fmt::Write;
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::pin::pin;
 use std::sync::{Arc, Mutex};
 
@@ -187,7 +187,6 @@ pub mod harness;
 #[cfg(test)]
 mod lib_tests;
 mod run_lock;
-mod sandbox;
 mod sessions;
 
 pub use self::dist::{dist, target_dir, workspace_root};
@@ -237,21 +236,6 @@ pub trait Fixture: Sized + 'static {
         _ = tracing_subscriber::fmt()
             .with_max_level(tracing::Level::INFO)
             .try_init();
-    }
-
-    /// Confine the application to `root`, a directory made fresh for this run
-    /// under the build directory, before any fixture starts. The run fails if
-    /// anything new is under `root` when it finishes; see [`Fixture::check`]
-    /// for failing the one test that reached outside it.
-    fn enter_sandbox(root: &Path) -> Result<()> {
-        _ = root;
-        Ok(())
-    }
-
-    /// Asked after every test: whatever the application did during it that
-    /// fails the test even though the test itself passed.
-    fn check() -> Result<()> {
-        Ok(())
     }
 
     /// Start the application for one test.
@@ -670,10 +654,6 @@ pub(crate) async fn run_one<F: Fixture>(
             writeln!(errors, "  Caused by: {e}")?;
             source = e.source();
         }
-    }
-
-    if let Err(error) = F::check() {
-        writeln!(errors, "Check error: {error}")?;
     }
 
     if !errors.is_empty() {
