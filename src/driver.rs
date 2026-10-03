@@ -379,7 +379,45 @@ impl Driver {
 
         let mut command = Command::new(&binary);
         command.args(engine.port_args());
-        Self::start(engine, &mut command, deadline).await
+        Self::start_until_it_keeps_a_port(engine, &mut command, deadline).await
+    }
+
+    /// Start one with `command`, and start it again each time it exits having
+    /// lost the port it picked to another process, up to [`PORT_RETRIES`] times
+    /// and all within `deadline`.
+    ///
+    /// chromedriver told to take any port takes one on `[::1]` and then tries to
+    /// take the same number on `127.0.0.1`. The two are handed out separately,
+    /// so under parallel runs that number is sometimes already taken on IPv4
+    /// and chromedriver gives up. Another start picks another number.
+    pub(crate) async fn start_until_it_keeps_a_port(
+        engine: Engine,
+        command: &mut tokio::process::Command,
+        deadline: Instant,
+    ) -> Result<Self> {
+        let mut lost = 0;
+
+        loop {
+            match Self::start(engine, command, deadline).await {
+                Err(error) if error.downcast_ref::<PortTaken>().is_some() => {
+                    lost += 1;
+
+                    if lost > PORT_RETRIES {
+                        return Err(error.context(format!(
+                            "{} lost the port it picked {lost} times in a row",
+                            engine.driver()
+                        )));
+                    }
+
+                    tracing::warn!(
+                        driver = engine.driver(),
+                        attempt = lost,
+                        "test driver lost the port it picked; starting it again: {error:#}"
+                    );
+                }
+                result => return result,
+            }
+        }
     }
 
     pub(crate) async fn start(
@@ -411,10 +449,13 @@ impl Driver {
         };
         let ready = tokio::time::timeout_at(deadline, async {
             for _ in 0..READY_LINES {
-                ensure!(
-                    driver.io().await?,
-                    "driver stopped before announcing its address"
-                );
+                if !driver.io().await? {
+                    if engine.lost_its_port(&driver.log) {
+                        return Err(PortTaken.into());
+                    }
+
+                    bail!("driver stopped before announcing its address");
+                }
                 if let Some(address) = driver.log.lines().find_map(|line| engine.address_of(line)) {
                     driver.address = address;
                     return Ok(());
@@ -509,6 +550,23 @@ impl Driver {
     }
 }
 
+/// A driver that exited before announcing its address because the port it
+/// picked was taken before it could listen on it, which starting it again
+/// gets past.
+#[derive(Debug)]
+pub(crate) struct PortTaken;
+
+impl fmt::Display for PortTaken {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(
+            "driver stopped before announcing its address: the port it picked \
+             was taken before it could listen on it",
+        )
+    }
+}
+
+impl std::error::Error for PortTaken {}
+
 /// A browser operation that did not answer by its deadline, named by stage.
 #[derive(Debug)]
 pub(crate) struct TimedOut(pub(crate) String);
@@ -533,12 +591,31 @@ pub(crate) fn with_cleanup(error: anyhow::Error, cleanup: Result<()>) -> anyhow:
 /// that says more.
 const READY_LINES: usize = 16;
 
+/// How many more times a driver that lost the port it picked is started before
+/// its start fails. Losing it is rare, so losing it again on the next try is
+/// rarer still; a driver that keeps losing has something else wrong with it.
+const PORT_RETRIES: usize = 3;
+
 impl Engine {
     /// How this engine's driver is told to serve on a port of its own choosing.
     fn port_args(self) -> &'static [&'static str] {
         match self {
             Engine::Firefox => &["--port", "0"],
             Engine::Chrome => &["--port=0"],
+        }
+    }
+
+    /// Whether what the driver said before it exited says that the port it
+    /// picked was taken before it could listen on it.
+    ///
+    /// Only chromedriver loses one: geckodriver listens on the port the system
+    /// gives it, while chromedriver listens on `[::1]` first and then asks for
+    /// the same number on `127.0.0.1`, saying `IPv4 port not available` when it
+    /// is taken (or the IPv6 one, the other way around).
+    fn lost_its_port(self, said: &str) -> bool {
+        match self {
+            Engine::Firefox => false,
+            Engine::Chrome => said.contains("port not available"),
         }
     }
 
@@ -707,6 +784,31 @@ mod tests {
         }
     }
 
+    /// **Only chromedriver saying its port was not available counts as losing
+    /// the port it picked**, so no other early exit is started again.
+    #[test]
+    fn only_a_taken_port_is_read_as_losing_it() {
+        let lost = [
+            "Starting ChromeDriver 154.0.8037.92 (abcdef) on port 0",
+            "[1759451000.123][SEVERE]: bind() failed: Address already in use (98)",
+            "IPv4 port not available. Exiting...",
+        ]
+        .join("\n");
+
+        assert!(Engine::Chrome.lost_its_port(&lost));
+        assert!(Engine::Chrome.lost_its_port("IPv6 port not available. Exiting..."));
+        assert!(!Engine::Firefox.lost_its_port(&lost));
+
+        for said in [
+            "",
+            "Starting ChromeDriver 154.0.8037.92 (abcdef) on port 0",
+            "ChromeDriver was started successfully on port 52725.",
+            "error while loading shared libraries: libnss3.so",
+        ] {
+            assert!(!Engine::Chrome.lost_its_port(said), "{said:?}");
+        }
+    }
+
     /// **Both are told to pick a port, which is what makes starting several at
     /// once safe** — and the two spellings are not interchangeable.
     /// chromedriver answers a separated `--port 0` with its usage and an exit.
@@ -826,6 +928,93 @@ pub(crate) mod lifecycle_tests {
         let message = format!("{error:#}");
         assert!(message.contains("fatal-startup-marker"), "{message}");
         assert!(message.contains("stopped before announcing"), "{message}");
+    }
+
+    /// A fake chromedriver that loses its port on its first `losses` starts,
+    /// and on the start after that announces port 12345, recording each start
+    /// in `starts`.
+    fn losing(losses: usize, starts: &std::path::Path) -> Command {
+        let mut command = Command::new("sh");
+        command.args([
+            "-c",
+            r#"echo start >> "$1"
+            if [ "$(wc -l < "$1")" -le "$2" ]; then
+                echo '[SEVERE]: bind() failed: Address already in use (98)' >&2
+                echo 'IPv4 port not available. Exiting...' >&2
+                exit 1
+            fi
+            echo 'ChromeDriver was started successfully on port 12345.'
+            exec sleep 60"#,
+            "fake-chromedriver",
+        ]);
+        command.arg(starts).arg(losses.to_string());
+        command
+    }
+
+    fn starts(path: &std::path::Path) -> usize {
+        std::fs::read_to_string(path).unwrap().lines().count()
+    }
+
+    #[tokio::test]
+    async fn a_driver_that_lost_its_port_is_started_again() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mut command = losing(PORT_RETRIES, file.path());
+        let mut driver = Driver::start_until_it_keeps_a_port(
+            Engine::Chrome,
+            &mut command,
+            Instant::now() + STARTUP_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        assert_eq!(driver.address.port(), 12345);
+        assert_eq!(starts(file.path()), PORT_RETRIES + 1);
+        driver.terminate().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_driver_that_keeps_losing_its_port_fails_saying_so() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mut command = losing(usize::MAX >> 1, file.path());
+        let error = Driver::start_until_it_keeps_a_port(
+            Engine::Chrome,
+            &mut command,
+            Instant::now() + STARTUP_TIMEOUT,
+        )
+        .await
+        .err()
+        .unwrap();
+        let message = format!("{error:#}");
+        assert_eq!(starts(file.path()), PORT_RETRIES + 1);
+        assert!(
+            message.contains("lost the port it picked 4 times"),
+            "{message}"
+        );
+        assert!(message.contains("IPv4 port not available"), "{message}");
+        assert!(message.contains("stopped before announcing"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn a_driver_that_stopped_for_another_reason_is_not_started_again() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mut command = Command::new("sh");
+        command.args([
+            "-c",
+            r#"echo start >> "$1"; echo 'cannot open display' >&2; exit 1"#,
+            "fake-chromedriver",
+        ]);
+        command.arg(file.path());
+        let error = Driver::start_until_it_keeps_a_port(
+            Engine::Chrome,
+            &mut command,
+            Instant::now() + STARTUP_TIMEOUT,
+        )
+        .await
+        .err()
+        .unwrap();
+        let message = format!("{error:#}");
+        assert_eq!(starts(file.path()), 1);
+        assert!(message.contains("cannot open display"), "{message}");
+        assert!(!message.contains("lost the port"), "{message}");
     }
 
     #[tokio::test]
