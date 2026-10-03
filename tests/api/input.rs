@@ -138,3 +138,26 @@ pub async fn set_text_refuses_an_element_without_text(
     );
     Ok(())
 }
+
+pub async fn set_text_keeps_text_that_needs_escaping(
+    driver: &mut TestDriver,
+    pages: &mut Pages,
+) -> Result<()> {
+    pages.open(driver, &PAGE).await?;
+
+    let label = driver.find_one_by("[data-test=label]").await?;
+
+    // A NUL before a digit is what splicing Rust's Debug escaping into the
+    // script turned into a legacy octal escape; the rest are quotes,
+    // backslashes, a JS line separator and template syntax.
+    let text = "nul\u{0}1 back\\slash \\0 \"double\" 'single' \u{2028}line ${not} `tick`";
+    driver.set_text(&label, text).await?;
+
+    let read = crate::eval(
+        driver,
+        "return document.querySelector('[data-test=label]').firstChild.data",
+    )
+    .await?;
+    ensure!(read == text, "read {read:?}");
+    Ok(())
+}

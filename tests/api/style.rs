@@ -217,3 +217,54 @@ pub async fn small_text_finds_small_text(driver: &mut TestDriver, pages: &mut Pa
     ensure!(driver.small_text(&texts, 6.0, ".mark").await?.is_empty());
     Ok(())
 }
+
+pub async fn set_style_and_set_class_take_values_as_given(
+    driver: &mut TestDriver,
+    pages: &mut Pages,
+) -> Result<()> {
+    pages.open(driver, &PAGE).await?;
+
+    let fits = driver.find_one_by("[data-test=fits]").await?;
+
+    driver.set_style(&fits, "--note", "\"it's\"").await?;
+    let note = driver.computed(&fits, "", "--note").await?;
+    ensure!(note == "\"it's\"", "--note is {note:?}");
+
+    let class = "it's\"\\\u{0}1";
+    driver.set_class(&fits, class, true).await?;
+    ensure!(fits.attr("class").await? == class);
+
+    driver.set_class(&fits, class, false).await?;
+    ensure!(fits.attr("class").await?.is_empty());
+    Ok(())
+}
+
+pub async fn small_text_takes_marks_as_given_and_refuses_an_unfinite_floor(
+    driver: &mut TestDriver,
+    pages: &mut Pages,
+) -> Result<()> {
+    pages.open(driver, &PAGE).await?;
+
+    let texts = driver.find_one_by("[data-test=texts]").await?;
+
+    let found = driver
+        .small_text(&texts, 10.0, ".mark, [data-it='s\"\\\\']")
+        .await?;
+    ensure!(
+        found == [r#"span.tiny at 8px: "tiny words""#],
+        "found {found:?}"
+    );
+
+    for floor in [f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
+        let Err(error) = driver.small_text(&texts, floor, ".mark").await else {
+            bail!("a floor of {floor} was accepted");
+        };
+
+        ensure!(
+            format!("{error:#}").contains("must be finite"),
+            "the refusal said {error:#}"
+        );
+    }
+
+    Ok(())
+}

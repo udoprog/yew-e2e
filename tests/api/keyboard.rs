@@ -101,3 +101,16 @@ pub async fn press_key_with_shift_holds_shift(
         .await?;
     logged_exactly(driver, ["keydown Tab shift @target"]).await
 }
+
+pub async fn press_key_on_takes_quotes_as_given(
+    driver: &mut TestDriver,
+    pages: &mut Pages,
+) -> Result<()> {
+    pages.open(driver, &PAGE).await?;
+
+    driver.press_key_on("[data-test=\"target\"]", "\"").await?;
+    driver
+        .press_key_with_shift("[data-test='target']", "\\")
+        .await?;
+    logged_exactly(driver, ["keydown \" @target", "keydown \\ shift @target"]).await
+}

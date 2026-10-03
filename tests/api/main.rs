@@ -316,6 +316,7 @@ mod suite {
             set_value_fires_the_named_event,
             set_text_replaces_the_text_node,
             set_text_refuses_an_element_without_text,
+            set_text_keeps_text_that_needs_escaping,
         },
         keyboard::{
             press_key_lands_on_the_page,
@@ -323,6 +324,7 @@ mod suite {
             press_key_on_dispatches_any_named_key,
             press_key_with_ctrl_carries_the_code,
             press_key_with_shift_holds_shift,
+            press_key_on_takes_quotes_as_given,
         },
         pointer::{
             click_presses_the_centre,
@@ -361,6 +363,7 @@ mod suite {
             wheel_alt_holds_alt_over_the_middle,
             wheel_over_says_whether_the_page_took_it,
             wheel_consumed_says_whether_the_page_took_it,
+            wheel_refuses_an_unfinite_delta,
         },
         scroll::{
             scroll_top_scrolls_a_container,
@@ -394,6 +397,7 @@ mod suite {
         },
         style::{
             set_style_and_set_class_force_styles,
+            set_style_and_set_class_take_values_as_given,
             computed_reads_a_pseudo_element,
             animation_time_pauses_an_animation,
             animation_time_refuses_a_missing_animation,
@@ -401,6 +405,7 @@ mod suite {
             painted_color_alpha_and_color_shift_measure_colour,
             overflowing_finds_clipped_boxes,
             small_text_finds_small_text,
+            small_text_takes_marks_as_given_and_refuses_an_unfinite_floor,
         },
         canvas::{
             canvas_size_reads_the_three_sizes,

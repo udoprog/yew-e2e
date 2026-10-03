@@ -588,6 +588,13 @@ const SESSION_DEATH: &[&str] = &[
     "error sending request",
 ];
 
+/// A number handed to a page script as an argument, refused unless it is
+/// finite: JSON has no infinity or NaN, so the page would read `null` instead.
+fn finite(what: &str, value: f64) -> Result<serde_json::Value> {
+    ensure!(value.is_finite(), "{what} must be finite, not {value}");
+    Ok(serde_json::json!(value))
+}
+
 /// Whether an error is the browser or its driver being gone, and the words
 /// that said so.
 pub(crate) fn browser_death(error: &anyhow::Error) -> Option<&'static str> {
@@ -1529,10 +1536,15 @@ impl TestDriver {
     ) -> Result<()> {
         tracing::trace!(property, value, "Setting an inline style property");
 
-        let script = format!("arguments[0].style.setProperty({property:?}, {value:?});");
-
         self.inner
-            .execute(script, vec![element.inner.to_json()?])
+            .execute(
+                "arguments[0].style.setProperty(arguments[1], arguments[2]);",
+                vec![
+                    element.inner.to_json()?,
+                    serde_json::json!(property),
+                    serde_json::json!(value),
+                ],
+            )
             .await?;
 
         Ok(())
@@ -1544,10 +1556,15 @@ impl TestDriver {
     pub async fn set_class(&self, element: &TestElement, class: &str, on: bool) -> Result<()> {
         tracing::trace!(class, on, "Forcing a class");
 
-        let script = format!("arguments[0].classList.toggle({class:?}, {on});");
-
         self.inner
-            .execute(script, vec![element.inner.to_json()?])
+            .execute(
+                "arguments[0].classList.toggle(arguments[1], arguments[2]);",
+                vec![
+                    element.inner.to_json()?,
+                    serde_json::json!(class),
+                    serde_json::json!(on),
+                ],
+            )
             .await?;
 
         Ok(())
@@ -1580,14 +1597,15 @@ impl TestDriver {
     pub async fn set_text(&self, element: &TestElement, text: &str) -> Result<()> {
         tracing::trace!(text, "Replacing an element's text");
 
-        let script = format!(
-            "const node = arguments[0].firstChild; \
+        let script = "const node = arguments[0].firstChild; \
              if (!node || node.nodeType !== Node.TEXT_NODE) throw new Error('no text node'); \
-             node.data = {text:?};"
-        );
+             node.data = arguments[1];";
 
         self.inner
-            .execute(script, vec![element.inner.to_json()?])
+            .execute(
+                script,
+                vec![element.inner.to_json()?, serde_json::json!(text)],
+            )
             .await?;
 
         Ok(())
@@ -1643,10 +1661,11 @@ impl TestDriver {
     ) -> Result<Vec<String>> {
         tracing::trace!(floor, marks, "Finding text set below a size");
 
-        let script = format!(
-            "const out = []; \
-             for (const el of [arguments[0], ...arguments[0].querySelectorAll('*')]) {{ \
-                 if (el.closest({marks:?})) continue; \
+        let floor = finite("a text size floor", floor)?;
+
+        let script = "const out = []; \
+             for (const el of [arguments[0], ...arguments[0].querySelectorAll('*')]) { \
+                 if (el.closest(arguments[1])) continue; \
                  const words = Array.from(el.childNodes) \
                      .filter(n => n.nodeType === Node.TEXT_NODE) \
                      .map(n => n.textContent.trim()).join(' ').trim(); \
@@ -1656,19 +1675,21 @@ impl TestDriver {
                  const cs = getComputedStyle(el); \
                  if (cs.visibility !== 'visible') continue; \
                  const size = parseFloat(cs.fontSize); \
-                 if (size < {floor}) {{ \
+                 if (size < arguments[2]) { \
                      const test = el.getAttribute('data-test'); \
                      out.push(el.localName + (el.className ? '.' + String(el.className).trim().split(/\\s+/).join('.') : '') \
-                         + (test ? `[data-test=${{test}}]` : '') \
-                         + ` at ${{cs.fontSize}}: ${{JSON.stringify(words.slice(0, 32))}}`); \
-                 }} \
-             }} \
-             return out;"
-        );
+                         + (test ? `[data-test=${test}]` : '') \
+                         + ` at ${cs.fontSize}: ${JSON.stringify(words.slice(0, 32))}`); \
+                 } \
+             } \
+             return out;";
 
         let found = self
             .inner
-            .execute(script, vec![element.inner.to_json()?])
+            .execute(
+                script,
+                vec![element.inner.to_json()?, serde_json::json!(marks), floor],
+            )
             .await?;
 
         Ok(found
@@ -1687,14 +1708,15 @@ impl TestDriver {
     pub async fn wheel_consumed(&self, element: &TestElement, delta: f64) -> Result<bool> {
         tracing::trace!(delta, "Turning the wheel and asking who took it");
 
-        let script = format!(
-            "return !arguments[0].dispatchEvent(new WheelEvent('wheel', \
-             {{ deltaY: {delta}, bubbles: true, cancelable: true }}))"
-        );
+        let delta = finite("a wheel delta", delta)?;
 
         let taken = self
             .inner
-            .execute(script, vec![element.inner.to_json()?])
+            .execute(
+                "return !arguments[0].dispatchEvent(new WheelEvent('wheel', \
+                 { deltaY: arguments[1], bubbles: true, cancelable: true }))",
+                vec![element.inner.to_json()?, delta],
+            )
             .await?;
 
         Ok(taken.json().as_bool().unwrap_or(false))
@@ -1710,13 +1732,14 @@ impl TestDriver {
     pub async fn wheel(&self, element: &TestElement, delta: f64) -> Result<()> {
         tracing::trace!(delta, "Turning the wheel over an element");
 
-        let script = format!(
-            "arguments[0].dispatchEvent(new WheelEvent('wheel', \
-             {{ deltaY: {delta}, bubbles: true, cancelable: true }}))"
-        );
+        let delta = finite("a wheel delta", delta)?;
 
         self.inner
-            .execute(script, vec![element.inner.to_json()?])
+            .execute(
+                "arguments[0].dispatchEvent(new WheelEvent('wheel', \
+                 { deltaY: arguments[1], bubbles: true, cancelable: true }))",
+                vec![element.inner.to_json()?, delta],
+            )
             .await?;
 
         Ok(())
@@ -1731,17 +1754,20 @@ impl TestDriver {
     pub async fn wheel_alt(&self, element: &TestElement, delta: f64, shift: bool) -> Result<()> {
         tracing::trace!(delta, shift, "Turning the wheel with alt held");
 
-        let script = format!(
-            "const box = arguments[0].getBoundingClientRect(); \
+        let delta = finite("a wheel delta", delta)?;
+
+        let script = "const box = arguments[0].getBoundingClientRect(); \
              arguments[0].dispatchEvent(new WheelEvent('wheel', \
-             {{ deltaY: {delta}, altKey: true, shiftKey: {shift}, \
+             { deltaY: arguments[1], altKey: true, shiftKey: arguments[2], \
              clientX: box.left + box.width / 2, \
              clientY: box.top + box.height / 2, \
-             bubbles: true, cancelable: true }}))"
-        );
+             bubbles: true, cancelable: true }))";
 
         self.inner
-            .execute(script, vec![element.inner.to_json()?])
+            .execute(
+                script,
+                vec![element.inner.to_json()?, delta, serde_json::json!(shift)],
+            )
             .await?;
 
         Ok(())
@@ -1766,18 +1792,27 @@ impl TestDriver {
     ) -> Result<bool> {
         tracing::trace!(across, down, ctrl, "Turning the wheel over both axes");
 
-        let script = format!(
-            "const box = arguments[0].getBoundingClientRect(); \
+        let across = finite("a sideways wheel delta", across)?;
+        let down = finite("a wheel delta", down)?;
+
+        let script = "const box = arguments[0].getBoundingClientRect(); \
              return !arguments[0].dispatchEvent(new WheelEvent('wheel', \
-             {{ deltaX: {across}, deltaY: {down}, ctrlKey: {ctrl}, \
+             { deltaX: arguments[1], deltaY: arguments[2], ctrlKey: arguments[3], \
              clientX: box.left + box.width / 2, \
              clientY: box.top + box.height / 2, \
-             bubbles: true, cancelable: true }}))"
-        );
+             bubbles: true, cancelable: true }))";
 
         let taken = self
             .inner
-            .execute(script, vec![element.inner.to_json()?])
+            .execute(
+                script,
+                vec![
+                    element.inner.to_json()?,
+                    across,
+                    down,
+                    serde_json::json!(ctrl),
+                ],
+            )
             .await?;
 
         Ok(taken.json().as_bool().unwrap_or(false))
@@ -1788,13 +1823,14 @@ impl TestDriver {
     pub async fn wheel_across(&self, element: &TestElement, delta: f64) -> Result<()> {
         tracing::trace!(delta, "Turning the wheel sideways over an element");
 
-        let script = format!(
-            "arguments[0].dispatchEvent(new WheelEvent('wheel', \
-             {{ deltaX: {delta}, bubbles: true, cancelable: true }}))"
-        );
+        let delta = finite("a sideways wheel delta", delta)?;
 
         self.inner
-            .execute(script, vec![element.inner.to_json()?])
+            .execute(
+                "arguments[0].dispatchEvent(new WheelEvent('wheel', \
+                 { deltaX: arguments[1], bubbles: true, cancelable: true }))",
+                vec![element.inner.to_json()?, delta],
+            )
             .await?;
 
         Ok(())
@@ -1837,20 +1873,25 @@ impl TestDriver {
     /// already handed off, never a live alias into memory the caller is free
     /// to keep mutating.
     pub async fn delay_websocket_sends(&self, millis: u64) -> Result<()> {
-        self.inner.execute(format!(
-            "const inject = document.createElement('script'); \
-             inject.textContent = `(() => {{ \
+        // The injected source is built in the page, from the delay as a
+        // number, since the script element cannot read `arguments`.
+        let script = "const inject = document.createElement('script'); \
+             inject.textContent = `(() => { \
                  WebSocket.__e2eOriginalSend = WebSocket.__e2eOriginalSend \
                      || WebSocket.prototype.send; \
                  const send = WebSocket.__e2eOriginalSend; \
-                 WebSocket.prototype.send = function(data) {{ \
+                 WebSocket.prototype.send = function(data) { \
                      const copy = data && typeof data.slice === 'function' \
                          ? data.slice() : data; \
-                     setTimeout(() => {{ if (this.readyState === 1) send.call(this, copy); }}, {millis}); \
-                 }}; \
-             }})();`; \
-             document.documentElement.appendChild(inject); inject.remove();"
-        ), Vec::new()).await?;
+                     setTimeout(() => { if (this.readyState === 1) send.call(this, copy); }, \
+                         ${JSON.stringify(arguments[0])}); \
+                 }; \
+             })();`; \
+             document.documentElement.appendChild(inject); inject.remove();";
+
+        self.inner
+            .execute(script, vec![serde_json::json!(millis)])
+            .await?;
         Ok(())
     }
 
@@ -2827,14 +2868,14 @@ impl TestDriver {
     /// animation frame: the elements it is holding are replaced between two reads
     /// and the second one throws.
     pub async fn find_all_attrs(&self, selector: &str, attr: &str) -> Result<Vec<String>> {
-        let script = format!(
-            "return Array.from(document.querySelectorAll({})) \
-             .map(n => n.getAttribute({}) ?? '')",
-            serde_json::to_string(selector)?,
-            serde_json::to_string(attr)?,
-        );
-
-        let read = self.inner.execute(script, Vec::new()).await?;
+        let read = self
+            .inner
+            .execute(
+                "return Array.from(document.querySelectorAll(arguments[0])) \
+                 .map(n => n.getAttribute(arguments[1]) ?? '')",
+                vec![serde_json::json!(selector), serde_json::json!(attr)],
+            )
+            .await?;
 
         Ok(read
             .json()
@@ -2856,16 +2897,18 @@ impl TestDriver {
     /// of time rather than one that fails. A node the browser is not drawing has
     /// no box and is left out, so a count is also an answer to what is shown.
     pub async fn bands(&self, selector: &str, attr: &str) -> Result<Vec<(String, f64, f64)>> {
-        let script = format!(
-            "return Array.from(document.querySelectorAll({})) \
+        let script = "return Array.from(document.querySelectorAll(arguments[0])) \
              .filter(n => n.getClientRects().length > 0) \
-             .map(n => [n.getAttribute({}) ?? '', \
-             n.getBoundingClientRect().top, n.getBoundingClientRect().height])",
-            serde_json::to_string(selector)?,
-            serde_json::to_string(attr)?,
-        );
+             .map(n => [n.getAttribute(arguments[1]) ?? '', \
+             n.getBoundingClientRect().top, n.getBoundingClientRect().height])";
 
-        let read = self.inner.execute(script, Vec::new()).await?;
+        let read = self
+            .inner
+            .execute(
+                script,
+                vec![serde_json::json!(selector), serde_json::json!(attr)],
+            )
+            .await?;
         let read = read.json();
 
         let rows = read.as_array().context("a list of bands")?;
@@ -2891,15 +2934,16 @@ impl TestDriver {
 
     /// Dispatch a named key on a focused element, including keys WebDriver cannot encode.
     pub async fn press_key_on(&self, selector: &str, key: &str) -> Result<()> {
-        let script = format!(
-            "const at = document.querySelector({}); \
+        let script = "const at = document.querySelector(arguments[0]); \
              if (!at) throw new Error('No element for keyboard press'); \
              at.focus(); at.dispatchEvent(new KeyboardEvent('keydown', \
-             {{ key: {}, bubbles: true, cancelable: true }}));",
-            serde_json::to_string(selector)?,
-            serde_json::to_string(key)?,
-        );
-        self.inner.execute(script, Vec::new()).await?;
+             { key: arguments[1], bubbles: true, cancelable: true }));";
+        self.inner
+            .execute(
+                script,
+                vec![serde_json::json!(selector), serde_json::json!(key)],
+            )
+            .await?;
         Ok(())
     }
 
@@ -2918,16 +2962,20 @@ impl TestDriver {
             _ => key.to_owned(),
         };
 
-        let script = format!(
-            "const at = document.querySelector({}); \
-             if (at) {{ at.focus(); at.dispatchEvent(new KeyboardEvent('keydown', \
-             {{ key: {}, code: {}, ctrlKey: true, bubbles: true, cancelable: true }})); }}",
-            serde_json::to_string(selector)?,
-            serde_json::to_string(key)?,
-            serde_json::to_string(&code)?,
-        );
+        let script = "const at = document.querySelector(arguments[0]); \
+             if (at) { at.focus(); at.dispatchEvent(new KeyboardEvent('keydown', \
+             { key: arguments[1], code: arguments[2], ctrlKey: true, bubbles: true, cancelable: true })); }";
 
-        self.inner.execute(script, Vec::new()).await?;
+        self.inner
+            .execute(
+                script,
+                vec![
+                    serde_json::json!(selector),
+                    serde_json::json!(key),
+                    serde_json::json!(code),
+                ],
+            )
+            .await?;
         Ok(())
     }
 
@@ -2936,15 +2984,16 @@ impl TestDriver {
     pub async fn press_key_with_shift(&self, selector: &str, key: &str) -> Result<()> {
         tracing::trace!(selector, key, "Pressing a key with shift held");
 
-        let script = format!(
-            "const at = document.querySelector({}); \
-             if (at) {{ at.focus(); at.dispatchEvent(new KeyboardEvent('keydown', \
-             {{ key: {}, shiftKey: true, bubbles: true, cancelable: true }})); }}",
-            serde_json::to_string(selector)?,
-            serde_json::to_string(key)?,
-        );
+        let script = "const at = document.querySelector(arguments[0]); \
+             if (at) { at.focus(); at.dispatchEvent(new KeyboardEvent('keydown', \
+             { key: arguments[1], shiftKey: true, bubbles: true, cancelable: true })); }";
 
-        self.inner.execute(script, Vec::new()).await?;
+        self.inner
+            .execute(
+                script,
+                vec![serde_json::json!(selector), serde_json::json!(key)],
+            )
+            .await?;
         Ok(())
     }
 
