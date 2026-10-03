@@ -1,4 +1,4 @@
-//! `reload`, `reopen_with`, `in_second_tab`, `in_second_window`,
+//! `reload`, `reopen_with` (and the error watch across both), `in_second_tab`, `in_second_window`,
 //! `set_window_size`, `what_the_page_says` and `local_clock`.
 
 use yew_e2e::prelude::*;
@@ -62,6 +62,49 @@ pub async fn reopen_with_sets_the_query(driver: &mut TestDriver, pages: &mut Pag
 
     let url = driver.webdriver().current_url().await?;
     ensure!(url.path() == "/navigation", "reopened at {url}");
+    Ok(())
+}
+
+pub async fn reopen_with_keeps_the_watch(driver: &mut TestDriver, pages: &mut Pages) -> Result<()> {
+    pages.open(driver, &PAGE).await?;
+
+    driver.reopen_with("again=1").await?;
+    driver.wait_texts("[data-test=query]", ["?again=1"]).await?;
+
+    // What the reopened page throws is still heard.
+    ensure!(
+        eval(driver, "return document.body.hasAttribute('data-watching')").await? == true,
+        "the reopened page is not watched"
+    );
+    Ok(())
+}
+
+/// A test that never asked to watch the page is not made to by a reload, so
+/// what the reloaded page says on its console does not fail it.
+pub async fn reload_leaves_an_unwatched_test_unwatched(
+    driver: &mut TestDriver,
+    pages: &mut Pages,
+) -> Result<()> {
+    driver.webdriver().goto(pages.address(PAGE.name)).await?;
+    driver.find_one_by("body[data-page=navigation]").await?;
+
+    driver.reload().await?;
+    driver.wait_texts("[data-test=loads]", ["2"]).await?;
+
+    ensure!(
+        eval(driver, "return document.body.hasAttribute('data-watching')").await? == false,
+        "the reloaded page is watched"
+    );
+
+    eval(
+        driver,
+        "console.error('said on an unwatched page'); return null",
+    )
+    .await?;
+    ensure!(
+        driver.error_seen().await?.is_none(),
+        "an unwatched page's console was heard"
+    );
     Ok(())
 }
 

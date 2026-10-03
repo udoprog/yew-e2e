@@ -173,6 +173,7 @@ use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
 use std::pin::pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
@@ -430,6 +431,7 @@ impl Browser {
                 wait_timeout: WAIT_TIMEOUT,
                 load_timeout: LOAD_TIMEOUT,
                 waiting: Waiting::default(),
+                watching: AtomicBool::new(false),
                 downloads,
             },
         })
@@ -442,6 +444,7 @@ impl Browser {
     /// memory growth that closing the previous tab removed.
     async fn reset(&mut self, url: &str) -> Result<()> {
         self.driver.waiting.clear();
+        self.driver.watching.store(false, Ordering::Relaxed);
         for file in std::fs::read_dir(self.driver.downloads.path())? {
             std::fs::remove_file(file?.path())?;
         }
@@ -1384,6 +1387,9 @@ pub struct TestDriver {
     wait_timeout: Duration,
     load_timeout: Duration,
     waiting: Waiting,
+    /// Whether this test asked for [`TestDriver::watch_for_errors`], so the
+    /// helpers that navigate know to watch the page they arrive at too.
+    watching: AtomicBool,
 }
 
 impl TestDriver {
@@ -1847,7 +1853,27 @@ impl TestDriver {
     ///
     /// What it records for a thrown error is its message followed by its
     /// stack, since some browsers (Firefox) keep only the frames in the stack.
+    ///
+    /// The watch is the test's from here on: [`Self::reload`] and
+    /// [`Self::reopen_with`] start it again on the page they arrive at, and a
+    /// test that never asked for it is left unwatched by them.
     pub async fn watch_for_errors(&self) -> Result<()> {
+        self.watching.store(true, Ordering::Relaxed);
+        self.install_watch().await
+    }
+
+    /// Watch the page this has just navigated to, if the test is watching.
+    async fn rewatch(&self) -> Result<()> {
+        if !self.watching.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+
+        self.install_watch()
+            .await
+            .context("watching the page again after navigating")
+    }
+
+    async fn install_watch(&self) -> Result<()> {
         tracing::trace!("Listening for uncaught errors in the page");
 
         let script = "if (!document.body.hasAttribute('data-watching')) { \
@@ -2537,27 +2563,37 @@ impl TestDriver {
 
     /// Press the `index`th element matching `by`, re-finding it if the page
     /// moves underneath.
+    ///
+    /// Giving up says why the last press did not land, such as another
+    /// element covering this one, under the timeout.
     pub async fn press_nth(&self, by: impl IntoBy, index: usize) -> Result<()> {
         let by = by.into_by();
 
         tracing::trace!(?by, index, "Pressing element");
 
         let deadline = time::Instant::now() + self.wait_timeout;
+        let mut refused = None;
 
         loop {
             let found = self.find_all(by.clone()).await?;
 
-            if let Some(item) = found.get(index)
-                && item.click().await.is_ok()
-            {
-                return Ok(());
+            if let Some(item) = found.get(index) {
+                match item.click().await {
+                    Ok(()) => return Ok(()),
+                    Err(error) => refused = Some(error),
+                }
             }
 
             if time::Instant::now() >= deadline {
-                bail!(
+                let timeout = format!(
                     "Timed out after {:?} pressing {by} at {index}",
                     self.wait_timeout
                 );
+
+                return Err(match refused {
+                    Some(error) => error.context(timeout),
+                    None => anyhow!(timeout),
+                });
             }
 
             time::sleep(POLL_INTERVAL).await;
@@ -2573,21 +2609,28 @@ impl TestDriver {
         tracing::trace!(?by, index, "Right-clicking element");
 
         let deadline = time::Instant::now() + self.wait_timeout;
+        let mut refused = None;
 
         loop {
             let found = self.find_all(by.clone()).await?;
 
-            if let Some(item) = found.get(index)
-                && item.context_click().await.is_ok()
-            {
-                return Ok(());
+            if let Some(item) = found.get(index) {
+                match item.context_click().await {
+                    Ok(()) => return Ok(()),
+                    Err(error) => refused = Some(error),
+                }
             }
 
             if time::Instant::now() >= deadline {
-                bail!(
+                let timeout = format!(
                     "Timed out after {:?} right-clicking {by} at {index}",
                     self.wait_timeout
                 );
+
+                return Err(match refused {
+                    Some(error) => error.context(timeout),
+                    None => anyhow!(timeout),
+                });
             }
 
             time::sleep(POLL_INTERVAL).await;
@@ -2629,22 +2672,22 @@ impl TestDriver {
     }
 
     /// Reload the page, which is the only way to ask what the *server* holds.
+    /// A test watching for errors goes on watching the reloaded page.
     pub async fn reload(&self) -> Result<()> {
         tracing::trace!("Reloading the page");
         self.inner.refresh().await?;
-
-        let _ = self.watch_for_errors().await;
-        Ok(())
+        self.rewatch().await
     }
 
-    /// Open the page again with `query` in the address.
+    /// Open the page again with `query` in the address. A test watching for
+    /// errors goes on watching the reopened page.
     pub async fn reopen_with(&self, query: &str) -> Result<()> {
         tracing::trace!(query, "Reopening the page");
 
         let mut url = self.inner.current_url().await?;
         url.set_query(Some(query));
         self.inner.goto(url.as_str()).await?;
-        Ok(())
+        self.rewatch().await
     }
 
     /// Run `run` in a second tab showing the page this one shows, then close

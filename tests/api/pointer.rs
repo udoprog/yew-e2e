@@ -16,12 +16,15 @@ pub const PAGE: Page = Page {
 [data-test=pad] { position: absolute; left: 100px; top: 100px; width: 200px; height: 100px; background: #ddd; }
 [data-test=other] { position: absolute; left: 400px; top: 100px; width: 100px; height: 100px; background: #bbd; }
 [data-test=items] { position: absolute; left: 600px; top: 100px; }
+[data-test=covered] { position: absolute; left: 600px; top: 300px; }
+[data-test=cover] { position: absolute; left: -10px; top: -10px; width: 200px; height: 80px; background: #888; }
 [data-test=surface] { position: absolute; left: 100px; top: 300px; width: 300px; height: 200px; background: #dbd; touch-action: none; user-select: none; }
 </style>
 <div data-test="pad">pad</div>
 <div data-test="other">other</div>
 <div data-test="items"><button data-test="item">one</button> <button data-test="item">two</button></div>
 <div data-test="surface">surface</div>
+<div data-test="covered"><button data-test="under">under</button><div data-test="cover"></div></div>
 <output data-test="held"></output>
 "##,
     script: r##"
@@ -191,6 +194,32 @@ pub async fn context_press_nth_right_clicks_by_index(
 
     driver.context_press_nth("[data-test=item]", 1).await?;
     logged_exactly(driver, ["context two"]).await
+}
+
+/// A press that never lands gives up with what the browser said about the
+/// last attempt, rather than only that it ran out of time.
+pub async fn press_nth_gives_up_saying_why_the_press_failed(
+    driver: &mut TestDriver,
+    pages: &mut Pages,
+) -> Result<()> {
+    pages.open(driver, &PAGE).await?;
+
+    let Err(error) = driver.press_nth("[data-test=under]", 0).await else {
+        bail!("a covered button was pressed");
+    };
+
+    let said = error.to_string();
+    ensure!(
+        said.starts_with("Timed out after") && said.ends_with("at 0"),
+        "the timeout said {said:?}"
+    );
+
+    let why = format!("{error:#}");
+    ensure!(
+        error.chain().count() > 1 && why.len() > said.len(),
+        "the timeout gave no reason: {why:?}"
+    );
+    Ok(())
 }
 
 pub async fn drag_by_holds_the_button_until_drop_held(

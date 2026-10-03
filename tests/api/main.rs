@@ -336,6 +336,7 @@ mod suite {
             middle_click_presses_the_middle_button,
             press_nth_presses_by_index,
             context_press_nth_right_clicks_by_index,
+            press_nth_gives_up_saying_why_the_press_failed,
             drag_by_holds_the_button_until_drop_held,
             drag_by_lands_on_a_short_offset,
             drag_from_by_begins_off_centre,
@@ -368,6 +369,8 @@ mod suite {
         navigation::{
             reload_starts_the_page_again,
             reopen_with_sets_the_query,
+            reopen_with_keeps_the_watch,
+            reload_leaves_an_unwatched_test_unwatched,
             in_second_tab_runs_beside_the_first,
             in_second_window_runs_beside_the_first,
             in_second_tab_fails_on_what_the_page_threw,
