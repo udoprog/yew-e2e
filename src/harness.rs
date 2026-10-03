@@ -295,10 +295,18 @@ async fn drive<F: Fixture>(tests: Vec<Test<F>>, options: &Options) -> Result<boo
 
     let mut interrupt = pin!(interrupted()?);
 
+    // A worker that gives up is handed back only once the others have finished
+    // and the session is saved, so `--last-session` can still pick the run up.
+    let mut gave_up = None;
+
     loop {
         tokio::select! {
             result = workers.next() => match result {
-                Some(result) => result?,
+                Some(Ok(())) => {}
+                Some(Err(error)) => {
+                    eprintln!("a worker gave up: {error:?}");
+                    gave_up.get_or_insert(error);
+                }
                 None => break,
             },
             result = &mut interrupt, if !cancel.stopped() => {
@@ -359,7 +367,7 @@ async fn drive<F: Fixture>(tests: Vec<Test<F>>, options: &Options) -> Result<boo
         }
     }
 
-    let ok = failures.is_empty() && session.whole;
+    let ok = failures.is_empty() && session.whole && gave_up.is_none();
 
     let (_, _, missed) = session.counts();
 
@@ -399,6 +407,10 @@ async fn drive<F: Fixture>(tests: Vec<Test<F>>, options: &Options) -> Result<boo
             "run the rest with: {}",
             rerun_hint(package.as_deref(), exe.as_deref())
         );
+    }
+
+    if let Some(error) = gave_up {
+        return Err(error);
     }
 
     Ok(ok)
@@ -537,6 +549,56 @@ fn settle(report: &RefCell<Report>, closing: Result<Option<anyhow::Error>>) -> R
     Ok(())
 }
 
+/// Close a browser no failing test is waiting to be told about.
+///
+/// The tests it ran have already been recorded, and the run is not stopped on
+/// their account: anything closing it answers, a timed-out quit or worse, is
+/// said as a warning so the other workers finish and the session is saved.
+async fn retire(report: &RefCell<Report>, browser: impl Seat, after: &str) {
+    if let Err(error) = settle(report, browser.close().await) {
+        report
+            .borrow_mut()
+            .warn(error.context(format!("closing the browser {after}")));
+    }
+}
+
+/// What a worker needs of its browser; [`crate::Browser`] in a real run, and a
+/// stand-in in the runner's own tests.
+pub(crate) trait Seat: Sized {
+    /// What the test running in it last asked to wait for.
+    fn waiting(&self) -> crate::Waiting;
+
+    /// Run one test in it.
+    async fn run<F: Fixture>(
+        &mut self,
+        start: Start<F>,
+        setup: F::Setup,
+        limit: Option<Duration>,
+    ) -> Result<()>;
+
+    /// Take it down; see [`crate::Browser::close`].
+    async fn close(self) -> Result<Option<anyhow::Error>>;
+}
+
+impl Seat for crate::Browser {
+    fn waiting(&self) -> crate::Waiting {
+        self.driver.waiting()
+    }
+
+    async fn run<F: Fixture>(
+        &mut self,
+        start: Start<F>,
+        setup: F::Setup,
+        limit: Option<Duration>,
+    ) -> Result<()> {
+        crate::run_one(self, start, setup, limit).await
+    }
+
+    async fn close(self) -> Result<Option<anyhow::Error>> {
+        crate::Browser::close(self).await
+    }
+}
+
 /// One browser, and the tests it takes off the queue until there are none or
 /// the run is stopped.
 ///
@@ -554,7 +616,7 @@ async fn worker<F: Fixture>(
     worker_with(queue, report, cancel, grace, limit, crate::Browser::open).await
 }
 
-async fn worker_with<F: Fixture, O: std::future::Future<Output = Result<crate::Browser>>>(
+async fn worker_with<F: Fixture, B: Seat, O: std::future::Future<Output = Result<B>>>(
     queue: Rc<RefCell<VecDeque<Test<F>>>>,
     report: Rc<RefCell<Report>>,
     cancel: Rc<Cancel>,
@@ -601,11 +663,11 @@ async fn worker_with<F: Fixture, O: std::future::Future<Output = Result<crate::B
             tokio::time::sleep(grace).await;
         };
 
-        let waiting = open.driver.waiting();
+        let waiting = open.waiting();
         let began = Instant::now();
 
         let running = async {
-            let running = crate::run_one(&mut open, start, setup, limit);
+            let running = open.run(start, setup, limit);
 
             let Some(limit) = limit else {
                 return running.await;
@@ -627,11 +689,7 @@ async fn worker_with<F: Fixture, O: std::future::Future<Output = Result<crate::B
 
         let Some(mut result) = finished else {
             println!("test {name} ... cut short");
-
-            if let Err(error) = settle(&report, open.close().await) {
-                tracing::warn!(?error, "closing the browser after an interrupted test");
-            }
-
+            retire(&report, open, "after an interrupted test").await;
             break;
         };
 
@@ -645,8 +703,8 @@ async fn worker_with<F: Fixture, O: std::future::Future<Output = Result<crate::B
             }
         } else if keeps_browser(used) {
             browser = Some(open);
-        } else if let Err(error) = settle(&report, open.close().await) {
-            tracing::warn!(?error, "closing a browser that had run its course");
+        } else {
+            retire(&report, open, "that had run its course").await;
         }
 
         report
@@ -655,7 +713,7 @@ async fn worker_with<F: Fixture, O: std::future::Future<Output = Result<crate::B
     }
 
     if let Some(browser) = browser {
-        settle(&report, browser.close().await)?;
+        retire(&report, browser, "after its last test").await;
     }
 
     Ok(())
@@ -708,6 +766,33 @@ mod lifecycle_tests {
         ))
     }
 
+    /// A browser that passes every test it is given, and answers closing
+    /// with `close`.
+    struct Stand {
+        close: fn() -> Result<Option<anyhow::Error>>,
+        closed: Rc<Cell<usize>>,
+    }
+
+    impl Seat for Stand {
+        fn waiting(&self) -> crate::Waiting {
+            crate::Waiting::default()
+        }
+
+        async fn run<F: Fixture>(
+            &mut self,
+            _: Start<F>,
+            _: F::Setup,
+            _: Option<Duration>,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        async fn close(self) -> Result<Option<anyhow::Error>> {
+            self.closed.set(self.closed.get() + 1);
+            (self.close)()
+        }
+    }
+
     fn report() -> Rc<RefCell<Report>> {
         Rc::new(RefCell::new(Report::new(sessions::Session::new([
             "first".to_owned(),
@@ -728,7 +813,7 @@ mod lifecycle_tests {
             None,
             || {
                 attempts.set(attempts.get() + 1);
-                async { Err(anyhow::anyhow!("startup-original-marker")) }
+                async { Err::<Stand, _>(anyhow::anyhow!("startup-original-marker")) }
             },
         )
         .await
@@ -745,6 +830,44 @@ mod lifecycle_tests {
                 .iter()
                 .all(|(_, error)| error.to_string().contains("startup-original-marker"))
         );
+    }
+
+    /// A browser that dies after the last test it passed must not take the
+    /// run, and with it the session, down: the tests keep their passes and the
+    /// failed close is said as a warning.
+    #[tokio::test]
+    async fn a_failed_close_after_the_last_passing_test_is_a_warning() {
+        let queue = queue();
+        let report = report();
+        let closed = Rc::new(Cell::new(0));
+        worker_with(
+            queue.clone(),
+            report.clone(),
+            Rc::new(Cancel::default()),
+            Duration::ZERO,
+            None,
+            || {
+                let closed = closed.clone();
+                async move {
+                    Ok(Stand {
+                        close: || Err(anyhow::anyhow!("invalid session id: close-marker")),
+                        closed,
+                    })
+                }
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(closed.get(), 1);
+        assert!(queue.borrow().is_empty());
+        let report = report.borrow();
+        assert_eq!(report.session.counts(), (2, 0, 0));
+        assert_eq!(report.passed, 2);
+        assert!(report.failures.is_empty());
+        assert_eq!(report.warnings.len(), 1);
+        let warning = format!("{:#}", report.warnings[0]);
+        assert!(warning.contains("after its last test"), "{warning}");
+        assert!(warning.contains("close-marker"), "{warning}");
     }
 
     #[test]
@@ -802,7 +925,7 @@ mod lifecycle_tests {
                 cancel.stop();
                 async move {
                     let _guard = guard;
-                    std::future::pending().await
+                    std::future::pending::<Result<Stand>>().await
                 }
             },
         )
