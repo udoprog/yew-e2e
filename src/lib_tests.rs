@@ -285,7 +285,7 @@ mod lifecycle {
 
 #[cfg(test)]
 mod drag_nudge {
-    use crate::drag_nudge;
+    use crate::element::drag_nudge;
 
     #[test]
     fn steps_eight_towards_a_long_offset() {

@@ -14,7 +14,8 @@ use thirtyfour::prelude::*;
 use tokio::time::{self, Duration};
 
 use crate::driver::{self, Driver, QUIT_TIMEOUT, STARTUP_TIMEOUT, with_cleanup};
-use crate::{Engine, Fixture, LOAD_TIMEOUT, TestDriver, WAIT_TIMEOUT};
+use crate::finding::{LOAD_TIMEOUT, WAIT_TIMEOUT};
+use crate::{Engine, Fixture, TestDriver};
 
 /// **What a test last asked to wait for**, in the words the test used.
 ///
