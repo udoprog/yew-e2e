@@ -344,6 +344,7 @@ mod suite {
             alt_drag_by_holds_alt_until_drop_held_alt,
             cancel_pointer_cancels_without_releasing,
             release_all_input_lets_go_of_a_drag,
+            release_all_input_lets_go_of_nothing_unheld,
             middle_drag_by_pans_with_the_middle_button,
             pointer_drag_onto_releases_over_the_target,
         },

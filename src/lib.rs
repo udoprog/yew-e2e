@@ -348,6 +348,26 @@ impl Waiting {
     }
 }
 
+/// **Whether a drag begun here still has the main button down**, shared by a
+/// driver and every element found through it, so that
+/// [`TestDriver::release_all_input`] knows whether there is a button to let go
+/// of where the pointer is. Chromedriver dispatches a `pointerup` for a button
+/// nobody pressed, so releasing one blindly is not the no-op the WebDriver
+/// specification makes it.
+#[derive(Clone, Default)]
+pub(crate) struct Holding(Arc<AtomicBool>);
+
+impl Holding {
+    fn set(&self, held: bool) {
+        self.0.store(held, Ordering::Relaxed);
+    }
+
+    /// Whether the button was down, putting it up.
+    fn take(&self) -> bool {
+        self.0.swap(false, Ordering::Relaxed)
+    }
+}
+
 /// One browser, kept for as long as there are tests to run in it.
 pub(crate) struct Browser {
     webdriver: Driver,
@@ -432,6 +452,7 @@ impl Browser {
                 load_timeout: LOAD_TIMEOUT,
                 waiting: Waiting::default(),
                 watching: AtomicBool::new(false),
+                holding: Holding::default(),
                 downloads,
             },
         })
@@ -1042,7 +1063,7 @@ macro_rules! common {
                     Err(anyhow!("find_elements({by:?}) timed out after {timeout:?}"))
                 }
                 result = task => {
-                    Ok(result?.into_iter().map(|inner| TestElement { inner, wait_timeout: self.wait_timeout, waiting: self.waiting.clone() }).collect::<Vec<_>>())
+                    Ok(result?.into_iter().map(|inner| TestElement { inner, wait_timeout: self.wait_timeout, waiting: self.waiting.clone(), holding: self.holding.clone() }).collect::<Vec<_>>())
                 }
             }
         }
@@ -1069,6 +1090,7 @@ pub struct TestElement {
     inner: WebElement,
     wait_timeout: Duration,
     waiting: Waiting,
+    holding: Holding,
 }
 
 impl TestElement {
@@ -1233,6 +1255,7 @@ impl TestElement {
             .move_by_offset(dx - nx, dy - ny)
             .perform()
             .await?;
+        self.holding.set(true);
 
         Ok(())
     }
@@ -1259,6 +1282,7 @@ impl TestElement {
             .move_by_offset(dx - nx, dy - ny)
             .perform()
             .await?;
+        self.holding.set(true);
 
         Ok(())
     }
@@ -1281,6 +1305,7 @@ impl TestElement {
             .move_by_offset(dx - nx, dy - ny)
             .perform()
             .await?;
+        self.holding.set(true);
 
         Ok(())
     }
@@ -1333,10 +1358,24 @@ impl TestElement {
         Ok(self.inner.rect().await?)
     }
 
-    /// One of the element's *computed* CSS properties.
+    /// One of the element's *computed* CSS properties, as `getComputedStyle`
+    /// serializes it.
+    ///
+    /// The value is read in the page rather than through WebDriver's own
+    /// command, which chromedriver answers with every colour rewritten as
+    /// `rgba(...)`: a colour reads `rgb(255, 0, 0)` in every engine alike.
     pub async fn css(&self, name: &str) -> Result<String> {
         tracing::trace!(name, "Getting element style");
-        Ok(self.inner.css_value(name).await?)
+
+        let script = "return getComputedStyle(arguments[0]).getPropertyValue(arguments[1]);";
+
+        let value = self
+            .inner
+            .handle()
+            .execute(script, vec![self.inner.to_json()?, serde_json::json!(name)])
+            .await?;
+
+        Ok(value.json().as_str().unwrap_or_default().to_string())
     }
 
     /// The element's `value` property.
@@ -1390,6 +1429,7 @@ pub struct TestDriver {
     /// Whether this test asked for [`TestDriver::watch_for_errors`], so the
     /// helpers that navigate know to watch the page they arrive at too.
     watching: AtomicBool,
+    holding: Holding,
 }
 
 impl TestDriver {
@@ -1986,6 +2026,7 @@ impl TestDriver {
             .move_by_offset(2, 0)
             .perform()
             .await?;
+        self.holding.set(true);
 
         Ok(())
     }
@@ -1993,7 +2034,14 @@ impl TestDriver {
     /// Let go of every key and button the actions above hold, the WebDriver
     /// way, which also puts down a drag an engine would otherwise keep
     /// carrying into the next test.
+    ///
+    /// A drag begun here is let go where the pointer is, as the specification
+    /// asks; chromedriver's own release would let it go where it was pressed.
     pub async fn release_all_input(&self) -> Result<()> {
+        if self.holding.take() {
+            self.inner.action_chain().release().perform().await?;
+        }
+
         self.inner.action_chain().reset_actions().await?;
         Ok(())
     }
@@ -2006,6 +2054,7 @@ impl TestDriver {
             .release()
             .perform()
             .await?;
+        self.holding.set(false);
         Ok(())
     }
 
@@ -2438,6 +2487,7 @@ impl TestDriver {
     pub async fn drop_held(&self) -> Result<()> {
         tracing::trace!("Releasing a held drag");
         self.inner.action_chain().release().perform().await?;
+        self.holding.set(false);
         Ok(())
     }
 
@@ -2464,6 +2514,7 @@ impl TestDriver {
             .key_up(thirtyfour::Key::Alt)
             .perform()
             .await?;
+        self.holding.set(false);
 
         Ok(())
     }

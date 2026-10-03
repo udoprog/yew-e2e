@@ -331,9 +331,27 @@ pub async fn release_all_input_lets_go_of_a_drag(
     let surface = driver.find_one_by("[data-test=surface]").await?;
     surface.drag_by(-20, 0).await?;
     logged_exactly(driver, ["down 0,0"]).await?;
+    held(driver, "1 -20,0").await?;
 
     driver.release_all_input().await?;
     logged_exactly(driver, ["down 0,0", "up -20,0"]).await
+}
+
+pub async fn release_all_input_lets_go_of_nothing_unheld(
+    driver: &mut TestDriver,
+    pages: &mut Pages,
+) -> Result<()> {
+    pages.open(driver, &PAGE).await?;
+
+    let surface = driver.find_one_by("[data-test=surface]").await?;
+    surface.drag_by(-20, 0).await?;
+    driver.drop_held().await?;
+    driver.release_all_input().await?;
+
+    // A press after it lands straight after the drop: nothing was let go in
+    // between.
+    surface.click().await?;
+    logged_exactly(driver, ["down 0,0", "up -20,0", "down 0,0", "up 0,0"]).await
 }
 
 pub async fn middle_drag_by_pans_with_the_middle_button(
