@@ -1,15 +1,16 @@
 //! Getting hold of a WebDriver server the suite can drive.
 
 use std::fs;
-use std::io::{Cursor, Read};
+use std::io::{Cursor, Read, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
 
 use crate::driver::Engine;
 
-/// Where a fetched driver is kept, relative to the workspace root.
-const CACHE: &str = "target/e2e";
+/// Where a fetched driver is kept, relative to the build directory, so that it
+/// is covered by the same run lock as everything else a run writes there.
+const CACHE: &str = "e2e";
 
 /// Chrome for Testing's index of what it publishes, keyed by
 /// `MAJOR.MINOR.BUILD` and answering with the latest patch of each and every
@@ -31,14 +32,31 @@ const PLATFORM: &str = if cfg!(all(target_os = "windows", target_arch = "x86_64"
     ""
 };
 
-/// Where a fetched driver for `engine` is, whether or not it is there yet.
+/// Where a fetched driver for `engine` that matches the installed browser is,
+/// whether or not it is there yet.
+///
+/// **Named by the browser's build**, so a browser that updates itself to a new
+/// build misses the cache and gets a fresh driver, rather than every session
+/// failing on a driver that "only supports Chrome version N" until someone
+/// deletes it by hand.
 pub(crate) fn cached(engine: Engine) -> Result<PathBuf> {
-    let name = match cfg!(windows) {
-        true => format!("{}.exe", engine.driver()),
-        false => engine.driver().to_owned(),
-    };
+    if engine != Engine::Chrome {
+        bail!("{} is never fetched", engine.driver());
+    }
 
-    Ok(crate::dist::workspace_root()?.join(CACHE).join(name))
+    let build = build_of(&chrome_version()?)?;
+    Ok(cache_path(&crate::dist::target_dir()?, engine, &build))
+}
+
+/// Where the driver for `engine` matching `build` is kept under `target`.
+fn cache_path(target: &Path, engine: Engine, build: &str) -> PathBuf {
+    let mut name = format!("{}-{build}", engine.driver());
+
+    if cfg!(windows) {
+        name.push_str(".exe");
+    }
+
+    target.join(CACHE).join(name)
 }
 
 /// Fetch a driver for `engine` into [`cached`], and answer where it went.
@@ -76,10 +94,7 @@ pub(crate) fn fetch(engine: Engine) -> Result<PathBuf> {
         .bytes()
         .with_context(|| anyhow!("Reading {url}"))?;
 
-    let at = cached(engine)?;
-
-    let dir = at.parent().context("the cache has a parent")?;
-    fs::create_dir_all(dir).with_context(|| anyhow!("Creating {}", dir.display()))?;
+    let at = cache_path(&crate::dist::target_dir()?, engine, &build);
 
     extract(&archive, engine.driver(), &at)?;
 
@@ -89,6 +104,12 @@ pub(crate) fn fetch(engine: Engine) -> Result<PathBuf> {
 }
 
 /// Pull the one file out of the archive and put it where it belongs.
+///
+/// **Written beside its destination and renamed into place**, executable
+/// before it gets there. A run killed part way through (the outer `timeout`
+/// is expected to) leaves at most a stray temporary file, never a truncated
+/// or non-executable driver at `at` that every later run would take as
+/// fetched.
 fn extract(archive: &[u8], name: &str, at: &Path) -> Result<()> {
     let mut zip = zip::ZipArchive::new(Cursor::new(archive)).context("Reading the archive")?;
 
@@ -110,13 +131,27 @@ fn extract(archive: &[u8], name: &str, at: &Path) -> Result<()> {
         let mut bytes = Vec::with_capacity(entry.size() as usize);
         entry.read_to_end(&mut bytes)?;
 
-        fs::write(at, &bytes).with_context(|| anyhow!("Writing {}", at.display()))?;
+        let dir = at.parent().context("the cache has a parent")?;
+        fs::create_dir_all(dir).with_context(|| anyhow!("Creating {}", dir.display()))?;
+
+        let mut temp = tempfile::Builder::new()
+            .prefix(&format!(".{name}-"))
+            .tempfile_in(dir)
+            .with_context(|| anyhow!("Creating a temporary file in {}", dir.display()))?;
+
+        temp.write_all(&bytes)
+            .and_then(|()| temp.as_file().sync_all())
+            .with_context(|| anyhow!("Writing {}", temp.path().display()))?;
 
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(at, fs::Permissions::from_mode(0o755))?;
+            fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o755))?;
         }
+
+        temp.persist(at)
+            .map_err(|e| e.error)
+            .with_context(|| anyhow!("Moving the driver into place at {}", at.display()))?;
 
         return Ok(());
     }
@@ -318,7 +353,100 @@ fn download_url(build: &str, installed: &str) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_of, is_version, older};
+    use std::io::{Cursor, Write};
+    use std::path::Path;
+
+    use zip::write::SimpleFileOptions;
+
+    use super::{build_of, cache_path, extract, is_version, older};
+    use crate::driver::Engine;
+
+    /// A zip laid out the way Chrome for Testing lays out its own.
+    fn archive(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+
+        for (name, bytes) in entries {
+            zip.start_file(*name, SimpleFileOptions::default()).unwrap();
+            zip.write_all(bytes).unwrap();
+        }
+
+        zip.finish().unwrap().into_inner()
+    }
+
+    /// Everything in `dir`, by name.
+    fn listing(dir: &Path) -> Vec<String> {
+        let mut names = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect::<Vec<_>>();
+        names.sort();
+        names
+    }
+
+    /// **The cache is keyed by build**, so a Chrome that updated itself looks
+    /// somewhere new and fetches, and it lives under the build directory it is
+    /// given, which is the one the run lock covers.
+    #[test]
+    fn a_fetched_driver_is_kept_per_build_under_the_build_directory() {
+        let target = Path::new("/elsewhere/build");
+
+        let at = cache_path(target, Engine::Chrome, "151.0.7922");
+        let suffix = if cfg!(windows) { ".exe" } else { "" };
+
+        assert_eq!(
+            at,
+            target
+                .join("e2e")
+                .join(format!("chromedriver-151.0.7922{suffix}"))
+        );
+
+        assert_ne!(at, cache_path(target, Engine::Chrome, "152.0.7977"));
+    }
+
+    /// The driver comes out of its subdirectory in the archive, executable,
+    /// and nothing else is left beside it.
+    #[test]
+    fn extracting_puts_only_the_driver_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let at = dir.path().join("e2e").join("chromedriver-151.0.7922");
+
+        let zip = archive(&[
+            ("chromedriver-linux64/LICENSE.chromedriver", b"license"),
+            ("chromedriver-linux64/chromedriver", b"the driver"),
+        ]);
+
+        extract(&zip, "chromedriver", &at).unwrap();
+
+        assert_eq!(std::fs::read(&at).unwrap(), b"the driver");
+        assert_eq!(listing(at.parent().unwrap()), ["chromedriver-151.0.7922"]);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&at).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o755);
+        }
+
+        // A second fetch replaces the first rather than failing on it.
+        let zip = archive(&[("chromedriver-linux64/chromedriver", b"a newer driver")]);
+        extract(&zip, "chromedriver", &at).unwrap();
+
+        assert_eq!(std::fs::read(&at).unwrap(), b"a newer driver");
+        assert_eq!(listing(at.parent().unwrap()), ["chromedriver-151.0.7922"]);
+    }
+
+    /// An archive without the driver leaves nothing behind that a later run
+    /// could take for one.
+    #[test]
+    fn an_archive_without_the_driver_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let at = dir.path().join("chromedriver-151.0.7922");
+
+        let zip = archive(&[("chromedriver-linux64/LICENSE.chromedriver", b"license")]);
+
+        assert!(extract(&zip, "chromedriver", &at).is_err());
+        assert!(listing(dir.path()).is_empty());
+    }
 
     /// **The shape test decides what gets turned into a download URL**, since it
     /// is what picks Chrome's version out of a directory listing that also holds

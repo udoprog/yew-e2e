@@ -269,7 +269,8 @@ impl Engine {
         bail!(
             "No browser this suite can drive. It needs either a WebDriver server \
              on PATH — one of: {drivers} — or a Chrome it can fetch a matching \
-             chromedriver for, which it does by itself into target/e2e."
+             chromedriver for, which it does by itself into e2e/ under the \
+             build directory."
         )
     }
 

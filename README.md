@@ -115,7 +115,8 @@ serves its own pages.
 
 Everything else a run leaves behind goes under the build directory too: the
 record of every run in `target/e2e-sessions`, the run lock, a fetched
-`chromedriver` in `target/e2e`. Two suites sharing one build directory give
+`chromedriver` in `target/e2e`, named for the Chrome build it matches so that
+an updated Chrome fetches a new one. Two suites sharing one build directory give
 each other room with [`Config::sessions_dir`] and [`Config::lock_name`].
 
 <br>
