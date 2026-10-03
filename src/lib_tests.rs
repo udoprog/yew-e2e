@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod browser_death {
-    use crate::browser_death;
+    use crate::browser::browser_death;
 
     #[test]
     fn a_dead_session_says_its_own_name() {
