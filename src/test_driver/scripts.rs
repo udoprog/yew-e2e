@@ -14,17 +14,13 @@ impl TestDriver {
     /// kept on the page instead, where [`Self::wait_copied`] reads it. Lasts
     /// until the page is next loaded.
     pub async fn capture_clipboard(&self) -> Result<()> {
-        self.inner
-            .execute(
-                "const inject = document.createElement('script'); \
-                 inject.textContent = `navigator.clipboard.writeText = async text => { \
-                     document.body.setAttribute('data-copied', text); \
-                 };`; \
-                 document.documentElement.appendChild(inject); inject.remove();",
-                Vec::new(),
-            )
-            .await?;
-        Ok(())
+        let function = "() => { \
+             navigator.clipboard.writeText = async text => { \
+                 document.body.setAttribute('data-copied', text); \
+             }; \
+         }";
+
+        self.inject(function, Vec::new()).await
     }
 
     /// Delay every `WebSocket` send in this page by `millis`, so what the page
@@ -45,26 +41,19 @@ impl TestDriver {
     /// already handed off, never a live alias into memory the caller is free
     /// to keep mutating.
     pub async fn delay_websocket_sends(&self, millis: u64) -> Result<()> {
-        // The injected source is built in the page, from the delay as a
-        // number, since the script element cannot read `arguments`.
-        let script = "const inject = document.createElement('script'); \
-             inject.textContent = `(() => { \
-                 WebSocket.__e2eOriginalSend = WebSocket.__e2eOriginalSend \
-                     || WebSocket.prototype.send; \
-                 const send = WebSocket.__e2eOriginalSend; \
-                 WebSocket.prototype.send = function(data) { \
-                     const copy = data && typeof data.slice === 'function' \
-                         ? data.slice() : data; \
-                     setTimeout(() => { if (this.readyState === 1) send.call(this, copy); }, \
-                         ${JSON.stringify(arguments[0])}); \
-                 }; \
-             })();`; \
-             document.documentElement.appendChild(inject); inject.remove();";
+        let function = "millis => { \
+             WebSocket.__e2eOriginalSend = WebSocket.__e2eOriginalSend \
+                 || WebSocket.prototype.send; \
+             const send = WebSocket.__e2eOriginalSend; \
+             WebSocket.prototype.send = function(data) { \
+                 const copy = data && typeof data.slice === 'function' \
+                     ? data.slice() : data; \
+                 setTimeout(() => { if (this.readyState === 1) send.call(this, copy); }, \
+                     millis); \
+             }; \
+         }";
 
-        self.inner
-            .execute(script, vec![serde_json::json!(millis)])
-            .await?;
-        Ok(())
+        self.inject(function, vec![serde_json::json!(millis)]).await
     }
 
     /// Undo [`Self::delay_websocket_sends`], now that whatever it was
@@ -74,21 +63,14 @@ impl TestDriver {
     /// that stops looking right after, a trap for one that keeps going and
     /// pays it on every send from here to the next page load.
     pub async fn stop_delaying_websocket_sends(&self) -> Result<()> {
-        self.inner
-            .execute(
-                "const inject = document.createElement('script'); \
-                 inject.textContent = `(() => { \
-                     if (WebSocket.__e2eOriginalSend) { \
-                         WebSocket.prototype.send = WebSocket.__e2eOriginalSend; \
-                         delete WebSocket.__e2eOriginalSend; \
-                     } \
-                 })();`; \
-                 document.documentElement.appendChild(inject); inject.remove();"
-                    .to_owned(),
-                Vec::new(),
-            )
-            .await?;
-        Ok(())
+        let function = "() => { \
+             if (WebSocket.__e2eOriginalSend) { \
+                 WebSocket.prototype.send = WebSocket.__e2eOriginalSend; \
+                 delete WebSocket.__e2eOriginalSend; \
+             } \
+         }";
+
+        self.inject(function, Vec::new()).await
     }
 
     /// Wait until the text last written to the clipboard since
@@ -134,30 +116,33 @@ impl TestDriver {
     async fn install_watch(&self) -> Result<()> {
         tracing::trace!("Listening for uncaught errors in the page");
 
-        let script = "if (!document.body.hasAttribute('data-watching')) { \
-                 const inject = document.createElement('script'); \
-                 inject.textContent = `(() => { \
-                     const say = what => document.body.setAttribute( \
-                         'data-threw', String(what).slice(0, 6000)); \
-                     const told = (thrown, otherwise) => { \
-                         if (!(thrown instanceof Error)) { return otherwise; } \
-                         const head = String(thrown); \
-                         const stack = thrown.stack || ''; \
-                         return stack.startsWith(head) ? stack : head + '\\\\n' + stack; \
-                     }; \
-                     window.addEventListener('error', e => say(told(e.error, e.message))); \
-                     window.addEventListener('unhandledrejection', \
-                         e => say(told(e.reason, e.reason))); \
-                     const was = console.error; \
-                     console.error = (...a) => { say(a.join(' ')); was(...a); }; \
-                     document.body.setAttribute('data-watching', ''); \
-                 })();`; \
-                 document.documentElement.appendChild(inject); \
-                 inject.remove(); \
-             } \
-             return document.body.hasAttribute('data-watching');";
+        let function = "() => { \
+             if (document.body.hasAttribute('data-watching')) { return; } \
+             const say = what => document.body.setAttribute( \
+                 'data-threw', String(what).slice(0, 6000)); \
+             const told = (thrown, otherwise) => { \
+                 if (!(thrown instanceof Error)) { return otherwise; } \
+                 const head = String(thrown); \
+                 const stack = thrown.stack || ''; \
+                 return stack.startsWith(head) ? stack : head + '\\n' + stack; \
+             }; \
+             window.addEventListener('error', e => say(told(e.error, e.message))); \
+             window.addEventListener('unhandledrejection', \
+                 e => say(told(e.reason, e.reason))); \
+             const was = console.error; \
+             console.error = (...a) => { say(a.join(' ')); was(...a); }; \
+             document.body.setAttribute('data-watching', ''); \
+         }";
 
-        let watching = self.inner.execute(script, Vec::new()).await?;
+        self.inject(function, Vec::new()).await?;
+
+        let watching = self
+            .inner
+            .execute(
+                "return document.body.hasAttribute('data-watching');",
+                Vec::new(),
+            )
+            .await?;
 
         ensure!(
             watching.json().as_bool() == Some(true),

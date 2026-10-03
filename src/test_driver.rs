@@ -77,5 +77,29 @@ impl TestDriver {
         self.load_timeout
     }
 
+    /// **Run `function`, a JavaScript function's source, as the page's own
+    /// script**, called with `args`.
+    ///
+    /// A WebDriver script runs apart from the page in some browsers (Firefox
+    /// runs it in a sandbox), so what it puts on `window` or a prototype is
+    /// not what the page sees. A `<script>` element added to the document
+    /// runs as the page, and runs at once; it cannot read `arguments`, so the
+    /// call it makes is built in the page, with `args` as JSON.
+    async fn inject(&self, function: &str, args: Vec<serde_json::Value>) -> Result<()> {
+        let script = "const [source, args] = arguments; \
+             const inject = document.createElement('script'); \
+             inject.textContent = `(${source})(...${JSON.stringify(args)});`; \
+             document.documentElement.appendChild(inject); \
+             inject.remove();";
+
+        self.inner
+            .execute(
+                script,
+                vec![serde_json::json!(function), serde_json::json!(args)],
+            )
+            .await?;
+        Ok(())
+    }
+
     common!();
 }

@@ -30,12 +30,13 @@ impl TestDriver {
 
     /// Deny access for the current document, as when browser policy blocks storage.
     pub async fn block_local_storage(&self) -> Result<()> {
-        self.inner.execute(
-            "const script = document.createElement('script'); \
-             script.textContent = `Object.defineProperty(window, 'localStorage', {configurable: true, get() { throw new DOMException('Storage blocked by test', 'SecurityError'); }});`; \
-             document.documentElement.appendChild(script); script.remove();",
-            vec![],
-        ).await?;
-        Ok(())
+        let function = "() => { \
+             Object.defineProperty(window, 'localStorage', { \
+                 configurable: true, \
+                 get() { throw new DOMException('Storage blocked by test', 'SecurityError'); }, \
+             }); \
+         }";
+
+        self.inject(function, Vec::new()).await
     }
 }
