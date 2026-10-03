@@ -466,6 +466,10 @@ impl Browser {
     async fn reset(&mut self, url: &str) -> Result<()> {
         self.driver.waiting.clear();
         self.driver.watching.store(false, Ordering::Relaxed);
+        // A drag the last test left held is not this test's to let go of where
+        // the pointer is: its release_all_input must not send a pointerup into
+        // a page that never saw the press.
+        self.driver.holding.set(false);
         for file in std::fs::read_dir(self.driver.downloads.path())? {
             std::fs::remove_file(file?.path())?;
         }
