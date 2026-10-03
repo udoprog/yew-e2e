@@ -324,29 +324,27 @@ pub(crate) async fn run_one<F: Fixture>(
             return Err(error);
         }
 
-        writeln!(errors, "Test error: {error}")?;
-
-        let mut source = error.source();
-
-        while let Some(e) = source.take() {
-            writeln!(errors, "  Caused by: {e}")?;
-            source = e.source();
-        }
+        write_chain(&mut errors, "Test error", error)?;
     }
 
     if let Err(error) = fixture_result {
-        writeln!(errors, "Fixture error: {error}")?;
-
-        let mut source = error.source();
-
-        while let Some(e) = source.take() {
-            writeln!(errors, "  Caused by: {e}")?;
-            source = e.source();
-        }
+        write_chain(&mut errors, "Fixture error", &error)?;
     }
 
     if !errors.is_empty() {
         return Err(anyhow!("{errors}"));
+    }
+
+    Ok(())
+}
+
+/// One failure of a test's report: `label` and what the error says, then every
+/// cause under it, one to a line.
+fn write_chain(errors: &mut String, label: &str, error: &anyhow::Error) -> std::fmt::Result {
+    writeln!(errors, "{label}: {error}")?;
+
+    for cause in error.chain().skip(1) {
+        writeln!(errors, "  Caused by: {cause}")?;
     }
 
     Ok(())
@@ -438,7 +436,25 @@ fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> &str {
 mod browser_tests {
     use anyhow::{Context, Result, ensure};
 
-    use super::Browser;
+    use super::{Browser, write_chain};
+
+    /// A failure reads as its label and message, then each cause on a line
+    /// of its own.
+    #[test]
+    fn a_report_names_every_cause() -> Result<()> {
+        let error = anyhow::anyhow!("the root")
+            .context("the middle")
+            .context("the top");
+
+        let mut errors = String::new();
+        write_chain(&mut errors, "Test error", &error)?;
+
+        assert_eq!(
+            errors,
+            "Test error: the top\n  Caused by: the middle\n  Caused by: the root\n"
+        );
+        Ok(())
+    }
 
     /// Each test gets a document with no predecessor retained in its browser.
     ///
