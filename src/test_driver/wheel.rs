@@ -1,6 +1,7 @@
 //! Turning the wheel over an element.
 
 use anyhow::Result;
+use serde_json::json;
 
 use super::finite;
 use crate::{TestDriver, TestElement};
@@ -15,16 +16,8 @@ impl TestDriver {
 
         let delta = finite("a wheel delta", delta)?;
 
-        let taken = self
-            .inner
-            .execute(
-                "return !arguments[0].dispatchEvent(new WheelEvent('wheel', \
-                 { deltaY: arguments[1], bubbles: true, cancelable: true }))",
-                vec![element.inner.to_json()?, delta],
-            )
-            .await?;
-
-        Ok(taken.json().as_bool().unwrap_or(false))
+        self.turn_wheel(element, json!({ "deltaY": delta }), false)
+            .await
     }
 
     /// Turn the wheel over an element: a cancelable, bubbling `wheel` event
@@ -39,14 +32,8 @@ impl TestDriver {
 
         let delta = finite("a wheel delta", delta)?;
 
-        self.inner
-            .execute(
-                "arguments[0].dispatchEvent(new WheelEvent('wheel', \
-                 { deltaY: arguments[1], bubbles: true, cancelable: true }))",
-                vec![element.inner.to_json()?, delta],
-            )
+        self.turn_wheel(element, json!({ "deltaY": delta }), false)
             .await?;
-
         Ok(())
     }
 
@@ -61,20 +48,8 @@ impl TestDriver {
 
         let delta = finite("a wheel delta", delta)?;
 
-        let script = "const box = arguments[0].getBoundingClientRect(); \
-             arguments[0].dispatchEvent(new WheelEvent('wheel', \
-             { deltaY: arguments[1], altKey: true, shiftKey: arguments[2], \
-             clientX: box.left + box.width / 2, \
-             clientY: box.top + box.height / 2, \
-             bubbles: true, cancelable: true }))";
-
-        self.inner
-            .execute(
-                script,
-                vec![element.inner.to_json()?, delta, serde_json::json!(shift)],
-            )
-            .await?;
-
+        let init = json!({ "deltaY": delta, "altKey": true, "shiftKey": shift });
+        self.turn_wheel(element, init, true).await?;
         Ok(())
     }
 
@@ -100,27 +75,8 @@ impl TestDriver {
         let across = finite("a sideways wheel delta", across)?;
         let down = finite("a wheel delta", down)?;
 
-        let script = "const box = arguments[0].getBoundingClientRect(); \
-             return !arguments[0].dispatchEvent(new WheelEvent('wheel', \
-             { deltaX: arguments[1], deltaY: arguments[2], ctrlKey: arguments[3], \
-             clientX: box.left + box.width / 2, \
-             clientY: box.top + box.height / 2, \
-             bubbles: true, cancelable: true }))";
-
-        let taken = self
-            .inner
-            .execute(
-                script,
-                vec![
-                    element.inner.to_json()?,
-                    across,
-                    down,
-                    serde_json::json!(ctrl),
-                ],
-            )
-            .await?;
-
-        Ok(taken.json().as_bool().unwrap_or(false))
+        let init = json!({ "deltaX": across, "deltaY": down, "ctrlKey": ctrl });
+        self.turn_wheel(element, init, true).await
     }
 
     /// **Turn the wheel sideways**, reading as `deltaX`: the gesture a trackpad
@@ -130,14 +86,36 @@ impl TestDriver {
 
         let delta = finite("a sideways wheel delta", delta)?;
 
-        self.inner
-            .execute(
-                "arguments[0].dispatchEvent(new WheelEvent('wheel', \
-                 { deltaX: arguments[1], bubbles: true, cancelable: true }))",
-                vec![element.inner.to_json()?, delta],
-            )
+        self.turn_wheel(element, json!({ "deltaX": delta }), false)
+            .await?;
+        Ok(())
+    }
+
+    /// **Dispatch one `wheel` event on `element`**, cancelable and bubbling,
+    /// with what `init` sets on it, and say whether a listener prevented its
+    /// default. Where `centred`, the pointer is put in the middle of the
+    /// element rather than left at the origin a fresh `WheelEvent` carries.
+    async fn turn_wheel(
+        &self,
+        element: &TestElement,
+        init: serde_json::Value,
+        centred: bool,
+    ) -> Result<bool> {
+        let script = "const [element, init, centred] = arguments; \
+             if (centred) { \
+                 const box = element.getBoundingClientRect(); \
+                 init.clientX = box.left + box.width / 2; \
+                 init.clientY = box.top + box.height / 2; \
+             } \
+             init.bubbles = true; \
+             init.cancelable = true; \
+             return !element.dispatchEvent(new WheelEvent('wheel', init));";
+
+        let taken = self
+            .inner
+            .execute(script, vec![element.inner.to_json()?, init, json!(centred)])
             .await?;
 
-        Ok(())
+        Ok(taken.json().as_bool().unwrap_or(false))
     }
 }
