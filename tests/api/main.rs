@@ -375,6 +375,7 @@ mod suite {
             in_second_tab_runs_beside_the_first,
             in_second_window_runs_beside_the_first,
             in_second_tab_fails_on_what_the_page_threw,
+            in_second_tab_leaves_an_unwatched_test_unwatched,
             set_window_size_resizes_the_window,
             what_the_page_says_describes_the_page,
             local_clock_reads_the_browser_clock,

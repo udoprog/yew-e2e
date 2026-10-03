@@ -1898,9 +1898,10 @@ impl TestDriver {
     /// What it records for a thrown error is its message followed by its
     /// stack, since some browsers (Firefox) keep only the frames in the stack.
     ///
-    /// The watch is the test's from here on: [`Self::reload`] and
-    /// [`Self::reopen_with`] start it again on the page they arrive at, and a
-    /// test that never asked for it is left unwatched by them.
+    /// The watch is the test's from here on: [`Self::reload`],
+    /// [`Self::reopen_with`], [`Self::in_second_tab`] and
+    /// [`Self::in_second_window`] start it again on the page they arrive at,
+    /// and a test that never asked for it is left unwatched by them.
     pub async fn watch_for_errors(&self) -> Result<()> {
         self.watching.store(true, Ordering::Relaxed);
         self.install_watch().await
@@ -2747,8 +2748,10 @@ impl TestDriver {
 
     /// Run `run` in a second tab showing the page this one shows, then close
     /// it and come back. The tab is sized as every test's first one is, and
-    /// `run` is what waits for the page to come up; what the page threw fails
-    /// it as it would the test.
+    /// `run` is what waits for the page to come up. A test watching for errors
+    /// goes on watching in the second tab, and what the page there threw fails
+    /// it as it would the test; a test that never asked for the watch is left
+    /// unwatched there too.
     pub async fn in_second_tab(&self, run: impl AsyncFnOnce() -> Result<()>) -> Result<()> {
         self.in_second_context(true, run).await
     }
@@ -2775,6 +2778,7 @@ impl TestDriver {
             self.inner.switch_to_window(opened.clone()).await?;
             self.set_window_size(WINDOW.0, WINDOW.1).await?;
             self.inner.goto(url.as_str()).await?;
+            self.rewatch().await?;
             run().await?;
             match self.error_seen().await? {
                 Some(threw) => bail!("the page threw: {threw}"),

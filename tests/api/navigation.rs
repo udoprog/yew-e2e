@@ -1,5 +1,5 @@
-//! `reload`, `reopen_with` (and the error watch across both), `in_second_tab`, `in_second_window`,
-//! `set_window_size`, `what_the_page_says` and `local_clock`.
+//! `reload`, `reopen_with`, `in_second_tab`, `in_second_window` (and the error watch across all
+//! four), `set_window_size`, `what_the_page_says` and `local_clock`.
 
 use yew_e2e::prelude::*;
 
@@ -127,6 +127,11 @@ pub async fn in_second_tab_runs_beside_the_first(
                 driver.webdriver().window().await? != first,
                 "still in the first tab"
             );
+            // The test is watching, so the second tab is watched too.
+            ensure!(
+                eval(driver, "return document.body.hasAttribute('data-watching')").await? == true,
+                "the second tab is not watched"
+            );
             Ok(())
         })
         .await?;
@@ -155,6 +160,10 @@ pub async fn in_second_window_runs_beside_the_first(
         .in_second_window(async || {
             driver.find_one_by("body[data-page=navigation]").await?;
             ensure!(driver.webdriver().windows().await?.len() == 2);
+            ensure!(
+                eval(driver, "return document.body.hasAttribute('data-watching')").await? == true,
+                "the second window is not watched"
+            );
             Ok(())
         })
         .await?;
@@ -170,6 +179,8 @@ pub async fn in_second_window_runs_beside_the_first(
     Ok(())
 }
 
+/// The test is watching from [`Pages::open`], so the second tab is watched
+/// without the test asking again, and what it throws fails `in_second_tab`.
 pub async fn in_second_tab_fails_on_what_the_page_threw(
     driver: &mut TestDriver,
     pages: &mut Pages,
@@ -182,7 +193,6 @@ pub async fn in_second_tab_fails_on_what_the_page_threw(
     let result = driver
         .in_second_tab(async || {
             driver.find_one_by("body[data-page=navigation]").await?;
-            driver.watch_for_errors().await?;
             driver.press_nth("[data-test=throw]", 0).await?;
             driver
                 .wait_until("the throw to be heard", async || {
@@ -208,6 +218,41 @@ pub async fn in_second_tab_fails_on_what_the_page_threw(
     ensure!(
         driver.webdriver().window().await? == first,
         "not back in the first tab"
+    );
+    Ok(())
+}
+
+/// A test that never asked to watch the page is not made to by a second tab,
+/// so what the page there says on its console does not fail it.
+pub async fn in_second_tab_leaves_an_unwatched_test_unwatched(
+    driver: &mut TestDriver,
+    pages: &mut Pages,
+) -> Result<()> {
+    driver.webdriver().goto(pages.address(PAGE.name)).await?;
+    driver.find_one_by("body[data-page=navigation]").await?;
+
+    let driver = &*driver;
+
+    driver
+        .in_second_tab(async || {
+            driver.find_one_by("body[data-page=navigation]").await?;
+            ensure!(
+                eval(driver, "return document.body.hasAttribute('data-watching')").await? == false,
+                "the second tab is watched"
+            );
+            eval(
+                driver,
+                "console.error('said in an unwatched tab'); return null",
+            )
+            .await?;
+            Ok(())
+        })
+        .await
+        .context("an unwatched second tab failed the test")?;
+
+    ensure!(
+        driver.webdriver().windows().await?.len() == 1,
+        "the tab stayed open"
     );
     Ok(())
 }
