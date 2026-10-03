@@ -32,11 +32,17 @@ static ENGINE: OnceLock<Engine> = OnceLock::new();
 
 /// Whether this run shows the browser.
 pub(crate) fn headed() -> bool {
-    if let Some(&headed) = HEADED.get() {
-        return headed;
+    match HEADED.get() {
+        Some(&headed) => headed,
+        None => headed_from(false, std::env::var_os("E2E_HEADED").as_deref()),
     }
+}
 
-    std::env::var_os("E2E_HEADED").is_some_and(|value| value != "0" && value != "false")
+/// What `--headed` and `E2E_HEADED` between them say: the flag shows the
+/// browser, and so does any `E2E_HEADED` but `0` or `false`, so the variable
+/// still applies to a run that does not pass the flag.
+fn headed_from(flag: bool, env: Option<&std::ffi::OsStr>) -> bool {
+    flag || env.is_some_and(|value| value != "0" && value != "false")
 }
 
 /// Which browser this run drives.
@@ -235,7 +241,10 @@ impl<F: Fixture> Suite<F> {
 
         let engine = choose(options.browser)?;
 
-        _ = HEADED.set(options.headed);
+        _ = HEADED.set(headed_from(
+            options.headed,
+            std::env::var_os("E2E_HEADED").as_deref(),
+        ));
         _ = ENGINE.set(engine);
         F::init_tracing();
 
@@ -1339,4 +1348,26 @@ macro_rules! harness {
             suite.run()
         }
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::OsStr;
+
+    use super::headed_from;
+
+    /// **`E2E_HEADED` still applies when `--headed` is absent**, and the flag
+    /// shows the browser whatever the variable says.
+    #[test]
+    fn the_headed_variable_applies_without_the_flag() {
+        assert!(!headed_from(false, None));
+        assert!(headed_from(true, None));
+        for on in ["1", "true", "yes"] {
+            assert!(headed_from(false, Some(OsStr::new(on))));
+        }
+        for off in ["0", "false"] {
+            assert!(!headed_from(false, Some(OsStr::new(off))));
+            assert!(headed_from(true, Some(OsStr::new(off))));
+        }
+    }
 }

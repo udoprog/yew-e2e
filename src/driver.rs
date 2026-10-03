@@ -95,11 +95,19 @@ pub enum Engine {
 /// it says nothing and the machine answers for itself. Without it every run is
 /// read in whatever the machine prefers, and the other scheme is never looked
 /// at.
-fn forced_dark() -> Option<bool> {
-    match std::env::var("E2E_THEME").ok()?.as_str() {
-        "dark" => Some(true),
-        "light" => Some(false),
-        _ => None,
+fn forced_dark() -> Result<Option<bool>> {
+    match std::env::var("E2E_THEME") {
+        Ok(value) => theme_preference(&value).map(Some),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(error) => Err(error).context("reading E2E_THEME"),
+    }
+}
+
+fn theme_preference(value: &str) -> Result<bool> {
+    match value {
+        "dark" => Ok(true),
+        "light" => Ok(false),
+        _ => bail!("E2E_THEME must be dark or light, got {value:?}"),
     }
 }
 
@@ -161,7 +169,7 @@ impl Engine {
     /// The capabilities a session is opened with, headless unless asked
     /// otherwise.
     pub fn capabilities(self, headed: bool) -> Result<Capabilities> {
-        self.with_preferences(headed, forced_dark(), forced_motion()?, forced_scale()?)
+        self.with_preferences(headed, forced_dark()?, forced_motion()?, forced_scale()?)
     }
 
     fn with_preferences(
@@ -565,7 +573,17 @@ fn quoted(said: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Engine, motion_preference};
+    use super::{Engine, motion_preference, theme_preference};
+
+    #[test]
+    fn theme_preferences_are_explicit() {
+        assert!(theme_preference("dark").unwrap());
+        assert!(!theme_preference("light").unwrap());
+        for invalid in ["", "Dark", "LIGHT", "drak", "auto"] {
+            let error = theme_preference(invalid).unwrap_err();
+            assert!(error.to_string().contains("E2E_THEME"));
+        }
+    }
 
     #[test]
     fn motion_preferences_are_explicit_and_do_not_replace_theme_preferences() {
