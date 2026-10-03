@@ -278,6 +278,7 @@ mod suite {
             wait_until_polls_until_the_condition_holds,
             wait_until_within_gives_up_naming_what_it_waited_for,
             wait_until_passes_on_the_condition_error,
+            wait_until_within_bounds_a_slow_find,
             wait_texts_follows_the_page,
             wait_texts_gives_up_saying_what_it_last_read,
             wait_count_establishes_a_count,

@@ -3,11 +3,11 @@
 
 use std::sync::atomic::AtomicBool;
 
-use anyhow::{Result, anyhow, bail, ensure};
+use anyhow::{Result, ensure};
 use thirtyfour::prelude::*;
 use tokio::time::{self, Duration};
 
-use crate::finding::{POLL_INTERVAL, common};
+use crate::finding::common;
 use crate::{Holding, IntoBy, TestElement, Waiting};
 
 mod attributes;

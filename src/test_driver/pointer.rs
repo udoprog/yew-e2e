@@ -1,9 +1,10 @@
 //! Pressing, holding and letting go with the pointer.
 
-use anyhow::{Result, anyhow};
-use tokio::time;
+use anyhow::Result;
+use thirtyfour::By;
 
-use crate::{IntoBy, POLL_INTERVAL, TestDriver, TestElement};
+use crate::finding::{OutOfTime, poll};
+use crate::{IntoBy, TestDriver, TestElement};
 
 impl TestDriver {
     /// Carry one element onto another and let go.
@@ -129,33 +130,8 @@ impl TestDriver {
 
         tracing::trace!(?by, index, "Pressing element");
 
-        let deadline = time::Instant::now() + self.wait_timeout;
-        let mut refused = None;
-
-        loop {
-            let found = self.find_all(by.clone()).await?;
-
-            if let Some(item) = found.get(index) {
-                match item.click().await {
-                    Ok(()) => return Ok(()),
-                    Err(error) => refused = Some(error),
-                }
-            }
-
-            if time::Instant::now() >= deadline {
-                let timeout = format!(
-                    "Timed out after {:?} pressing {by} at {index}",
-                    self.wait_timeout
-                );
-
-                return Err(match refused {
-                    Some(error) => error.context(timeout),
-                    None => anyhow!(timeout),
-                });
-            }
-
-            time::sleep(POLL_INTERVAL).await;
-        }
+        self.press_nth_with(by, index, "pressing", async |item| item.click().await)
+            .await
     }
 
     /// The same as [`TestDriver::press_nth`], right-handed. A context menu that
@@ -166,32 +142,48 @@ impl TestDriver {
 
         tracing::trace!(?by, index, "Right-clicking element");
 
-        let deadline = time::Instant::now() + self.wait_timeout;
+        self.press_nth_with(by, index, "right-clicking", async |item| {
+            item.context_click().await
+        })
+        .await
+    }
+
+    /// Press the `index`th element matching `by` with `press` until it lands,
+    /// giving up with what the last attempt said under a timeout saying what
+    /// `doing` was.
+    async fn press_nth_with(
+        &self,
+        by: By,
+        index: usize,
+        doing: &str,
+        press: impl AsyncFn(&TestElement) -> Result<()>,
+    ) -> Result<()> {
         let mut refused = None;
 
-        loop {
-            let found = self.find_all(by.clone()).await?;
-
-            if let Some(item) = found.get(index) {
-                match item.context_click().await {
-                    Ok(()) => return Ok(()),
+        let pressed = poll(self.wait_timeout, async || {
+            if let Some(item) = self.find_all(by.clone()).await?.get(index) {
+                match press(item).await {
+                    Ok(()) => return Ok(Some(())),
                     Err(error) => refused = Some(error),
                 }
             }
 
-            if time::Instant::now() >= deadline {
-                let timeout = format!(
-                    "Timed out after {:?} right-clicking {by} at {index}",
-                    self.wait_timeout
-                );
+            Ok(None)
+        })
+        .await?;
 
-                return Err(match refused {
-                    Some(error) => error.context(timeout),
-                    None => anyhow!(timeout),
-                });
-            }
-
-            time::sleep(POLL_INTERVAL).await;
+        if pressed.is_some() {
+            return Ok(());
         }
+
+        let timeout = OutOfTime(format!(
+            "Timed out after {:?} {doing} {by} at {index}",
+            self.wait_timeout
+        ));
+
+        Err(match refused {
+            Some(error) => error.context(timeout),
+            None => timeout.into(),
+        })
     }
 }

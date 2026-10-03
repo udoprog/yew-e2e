@@ -2,7 +2,9 @@
 //! `wait_count_from`, `count`, and the timeouts they wait against.
 
 use std::cell::Cell;
+use std::time::{Duration, Instant};
 
+use tokio::time;
 use yew_e2e::prelude::*;
 
 use crate::{BRIEF, Page, Pages};
@@ -72,6 +74,64 @@ pub async fn wait_until_within_gives_up_naming_what_it_waited_for(
     ensure!(
         said == format!("Timed out after {BRIEF:?} waiting for the moon to rise"),
         "the timeout said {said:?}"
+    );
+
+    Ok(())
+}
+
+/// A find inside a wait is bounded by what is left of the wait rather than
+/// by the find's own timeout, so a page too busy to answer cannot carry a
+/// brief wait seconds past its deadline.
+pub async fn wait_until_within_bounds_a_slow_find(
+    driver: &mut TestDriver,
+    pages: &mut Pages,
+) -> Result<()> {
+    pages.open(driver, &PAGE).await?;
+
+    // Keep the page's main thread busy for longer than the wait, so that no
+    // find can be answered until it is done. The loop is run by the page
+    // itself, since a timer set from a WebDriver script may run elsewhere.
+    driver
+        .webdriver()
+        .execute(
+            "const busy = document.createElement('script'); \
+             busy.textContent = 'setTimeout(() => { \
+                 const end = Date.now() + 3000; while (Date.now() < end) {} }, 50);'; \
+             document.body.append(busy);",
+            Vec::new(),
+        )
+        .await?;
+
+    time::sleep(Duration::from_millis(100)).await;
+
+    let start = Instant::now();
+
+    let result = driver
+        .wait_until_within(BRIEF, "a busy page to answer", async || {
+            Ok(driver
+                .find_all(By::Css("[data-test=items] li"))
+                .await?
+                .len()
+                == 2)
+        })
+        .await;
+
+    let took = start.elapsed();
+
+    // Let the page finish being busy before anything else asks it something.
+    driver.wait_count("[data-test=items] li", 1).await?;
+
+    let Err(error) = result else {
+        bail!("a page too busy to answer was waited out");
+    };
+
+    ensure!(
+        error.to_string() == format!("Timed out after {BRIEF:?} waiting for a busy page to answer"),
+        "the wait said {error:#}"
+    );
+    ensure!(
+        took < Duration::from_millis(1500),
+        "a {BRIEF:?} wait took {took:?}"
     );
 
     Ok(())

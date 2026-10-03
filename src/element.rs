@@ -1,12 +1,12 @@
 //! [`TestElement`], one element a lookup found.
 
 use anyhow::Result;
-use anyhow::{anyhow, bail, ensure};
+use anyhow::ensure;
 use thirtyfour::common::types::ElementRect;
 use thirtyfour::prelude::*;
 use tokio::time::{self, Duration};
 
-use crate::finding::{POLL_INTERVAL, common};
+use crate::finding::common;
 use crate::{Holding, IntoBy, Waiting};
 
 /// The first step of a drag along one axis: up to 8px towards `offset`, never
