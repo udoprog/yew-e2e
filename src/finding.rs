@@ -332,7 +332,7 @@ macro_rules! common {
         }
 
         /// Find all elements matching `by`.
-        pub async fn find_all(&self, by: impl Into<By>) -> Result<Vec<TestElement>> {
+        pub async fn find_all(&self, by: impl IntoBy) -> Result<Vec<TestElement>> {
             self.find_all_within(self.wait_timeout, by).await
         }
 
@@ -344,9 +344,9 @@ macro_rules! common {
         pub async fn find_all_within(
             &self,
             timeout: Duration,
-            by: impl Into<By>,
+            by: impl IntoBy,
         ) -> Result<Vec<TestElement>> {
-            let by = by.into();
+            let by = by.into_by();
             let timeout = crate::finding::bounded(timeout);
             tracing::trace!(?by, "Finding all elements");
 
