@@ -1,5 +1,5 @@
-//! `send_keys`, `clear`, `focus`, `blur`, `focused_attr`, `set_value` and
-//! `set_text`.
+//! `send_keys`, `clear`, `focus`, `blur`, `focused_attr`, `text_selection`,
+//! `set_value` and `set_text`.
 
 use yew_e2e::prelude::*;
 
@@ -159,5 +159,29 @@ pub async fn set_text_keeps_text_that_needs_escaping(
     )
     .await?;
     ensure!(read == text, "read {read:?}");
+    Ok(())
+}
+
+pub async fn text_selection_reads_the_selection(
+    driver: &mut TestDriver,
+    pages: &mut Pages,
+) -> Result<()> {
+    pages.open(driver, &PAGE).await?;
+
+    ensure!(
+        driver.text_selection().await?.is_empty(),
+        "a fresh page has a selection"
+    );
+
+    driver
+        .webdriver()
+        .execute(
+            "window.getSelection().selectAllChildren(document.querySelector('[data-test=label]'))",
+            Vec::new(),
+        )
+        .await?;
+
+    let selected = driver.text_selection().await?;
+    ensure!(selected == "Original", "the selection is {selected:?}");
     Ok(())
 }

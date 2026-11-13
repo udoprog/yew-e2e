@@ -1,4 +1,5 @@
-//! Keys, pressed through WebDriver or dispatched on an element, and focus.
+//! Keys, pressed through WebDriver or dispatched on an element, focus and the
+//! selection.
 
 use anyhow::Result;
 use thirtyfour::prelude::*;
@@ -123,5 +124,15 @@ impl TestDriver {
             .await?;
 
         Ok(found.json().as_str().map(str::to_owned))
+    }
+
+    /// The text the page has selected, empty when nothing is.
+    pub async fn text_selection(&self) -> Result<String> {
+        let selected = self
+            .inner
+            .execute("return window.getSelection().toString()", Vec::new())
+            .await?;
+
+        Ok(selected.json().as_str().unwrap_or_default().to_owned())
     }
 }

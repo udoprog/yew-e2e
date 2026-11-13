@@ -1,5 +1,6 @@
 //! `reload`, `reopen_with`, `in_second_tab`, `in_second_window` (and the error watch across all
-//! four), `set_window_size`, `what_the_page_says` and `local_clock`.
+//! four), `wait_page`, `visit`, `wait_window`, `in_new_tab`, `in_new_window`, `set_window_size`,
+//! `what_the_page_says` and `local_clock`.
 
 use yew_e2e::prelude::*;
 
@@ -13,6 +14,7 @@ pub const PAGE: Page = Page {
 <output data-test="bumps">0</output>
 <button data-test="bump">Bump</button>
 <button data-test="throw">Throw</button>
+<div data-window="it's" hidden>Late</div>
 "##,
     script: r##"
 document.querySelector("[data-test=query]").textContent = location.search;
@@ -26,6 +28,7 @@ document.querySelector("[data-test=bump]").addEventListener("click", () => {
 document.querySelector("[data-test=throw]").addEventListener("click", () => {
     setTimeout(() => { throw new Error("thrown in the second tab"); });
 });
+setTimeout(() => { document.querySelector("[data-window=\"it's\"]").hidden = false; }, 300);
 "##,
 };
 
@@ -253,6 +256,107 @@ pub async fn in_second_tab_leaves_an_unwatched_test_unwatched(
     ensure!(
         driver.webdriver().windows().await?.len() == 1,
         "the tab stayed open"
+    );
+    Ok(())
+}
+
+pub async fn wait_page_waits_and_watches(driver: &mut TestDriver, pages: &mut Pages) -> Result<()> {
+    driver.webdriver().goto(pages.address(PAGE.name)).await?;
+    driver.wait_page("navigation").await?;
+
+    ensure!(
+        eval(driver, "return document.body.hasAttribute('data-watching')").await? == true,
+        "the page is not watched"
+    );
+    Ok(())
+}
+
+pub async fn wait_page_gives_up_saying_what_the_page_says(
+    driver: &mut TestDriver,
+    pages: &mut Pages,
+) -> Result<()> {
+    driver.webdriver().goto(pages.address(PAGE.name)).await?;
+
+    let Err(error) = driver.wait_page("elsewhere").await else {
+        bail!("waited out a page that never came");
+    };
+
+    let said = format!("{error:#}");
+    ensure!(
+        said.contains("page elsewhere") && said.contains("the page showing is 'navigation'"),
+        "the wait said {said:?}"
+    );
+    Ok(())
+}
+
+pub async fn visit_goes_and_returns_where_it_was(
+    driver: &mut TestDriver,
+    pages: &mut Pages,
+) -> Result<()> {
+    pages.open(driver, &PAGE).await?;
+
+    let first = pages.address(PAGE.name);
+    let was = driver
+        .visit(&format!("{first}?visited=1"), "navigation")
+        .await?;
+
+    ensure!(was == first, "came from {was:?}, not {first:?}");
+    driver.wait_texts("[data-test=query]", ["?visited=1"]).await
+}
+
+pub async fn wait_window_waits_for_a_visible_window(
+    driver: &mut TestDriver,
+    pages: &mut Pages,
+) -> Result<()> {
+    driver.webdriver().goto(pages.address(PAGE.name)).await?;
+    driver.wait_window("it's").await?;
+
+    ensure!(
+        driver
+            .find_one_by("[data-window=\"it's\"]")
+            .await?
+            .visible()
+            .await?,
+        "the window is not visible"
+    );
+    ensure!(
+        eval(driver, "return document.body.hasAttribute('data-watching')").await? == true,
+        "the page is not watched"
+    );
+    Ok(())
+}
+
+pub async fn in_new_tab_and_window_wait_for_the_window(
+    driver: &mut TestDriver,
+    pages: &mut Pages,
+) -> Result<()> {
+    pages.open(driver, &PAGE).await?;
+
+    let driver = &*driver;
+    let first = driver.webdriver().window().await?;
+    let shown = async || {
+        ensure!(driver.webdriver().windows().await?.len() == 2);
+        ensure!(
+            driver
+                .find_one_by("[data-window=\"it's\"]")
+                .await?
+                .visible()
+                .await?,
+            "ran before the window was shown"
+        );
+        Ok(())
+    };
+
+    driver.in_new_tab("it's", shown).await?;
+    driver.in_new_window("it's", shown).await?;
+
+    ensure!(
+        driver.webdriver().windows().await?.len() == 1,
+        "a second context stayed open"
+    );
+    ensure!(
+        driver.webdriver().window().await? == first,
+        "not back in the first tab"
     );
     Ok(())
 }

@@ -1,7 +1,8 @@
-//! Where the browser is: its window, its clock, and going to a page again or
-//! in a second tab or window.
+//! Where the browser is: its window, its clock, waiting for a page or window
+//! to show, and going to a page again or in a second tab or window.
 
 use anyhow::{Context, Result, bail};
+use thirtyfour::By;
 
 use crate::driver::with_cleanup;
 use crate::{TestDriver, WINDOW};
@@ -70,6 +71,86 @@ impl TestDriver {
         Ok(told.json().as_str().unwrap_or_default().to_owned())
     }
 
+    /// Wait for the body to carry `data-page` = `page`, then watch the page
+    /// for errors. Gives up after [`Self::load_timeout`] with
+    /// [`Self::what_the_page_says`].
+    pub async fn wait_page(&self, page: &str) -> Result<()> {
+        tracing::trace!(page, "Waiting for page");
+
+        let selector = By::Css(format!("body[data-page={}]", css_string(page)));
+
+        let arrived = self
+            .wait_until_within(
+                self.load_timeout(),
+                format_args!("page {page}"),
+                async || {
+                    Ok(!self
+                        .find_all_within(self.load_timeout(), selector.clone())
+                        .await?
+                        .is_empty())
+                },
+            )
+            .await;
+
+        if let Err(error) = arrived {
+            bail!(
+                "{error}{}",
+                self.what_the_page_says().await.unwrap_or_default()
+            );
+        }
+
+        self.watch_for_errors().await
+    }
+
+    /// Go to `url` and [wait for `page`](Self::wait_page), returning the
+    /// address the browser was at before.
+    pub async fn visit(&self, url: &str, page: &str) -> Result<String> {
+        let was = self.inner.current_url().await?;
+
+        tracing::trace!(url, %was, page, "Visiting");
+
+        self.inner.goto(url).await?;
+        self.wait_page(page).await?;
+        Ok(was.to_string())
+    }
+
+    /// Wait for a visible element whose `data-window` is `window`, then watch
+    /// the page for errors. Gives up after [`Self::load_timeout`] with
+    /// [`Self::what_the_page_says`].
+    pub async fn wait_window(&self, window: &str) -> Result<()> {
+        tracing::trace!(window, "Waiting for window");
+
+        let selector = By::Css(format!("[data-window={}]", css_string(window)));
+
+        let arrived = self
+            .wait_until_within(
+                self.load_timeout(),
+                format_args!("window {window}"),
+                async || {
+                    for element in self
+                        .find_all_within(self.load_timeout(), selector.clone())
+                        .await?
+                    {
+                        if element.visible().await.unwrap_or(false) {
+                            return Ok(true);
+                        }
+                    }
+
+                    Ok(false)
+                },
+            )
+            .await;
+
+        if let Err(error) = arrived {
+            bail!(
+                "{error}{}",
+                self.what_the_page_says().await.unwrap_or_default()
+            );
+        }
+
+        self.watch_for_errors().await
+    }
+
     /// Reload the page, which is the only way to ask what the *server* holds.
     /// A test watching for errors goes on watching the reloaded page.
     pub async fn reload(&self) -> Result<()> {
@@ -102,6 +183,34 @@ impl TestDriver {
     /// The same in a second window.
     pub async fn in_second_window(&self, run: impl AsyncFnOnce() -> Result<()>) -> Result<()> {
         self.in_second_context(false, run).await
+    }
+
+    /// [`Self::in_second_tab`], [waiting for `window`](Self::wait_window)
+    /// there before `run`.
+    pub async fn in_new_tab(
+        &self,
+        window: &str,
+        run: impl AsyncFnOnce() -> Result<()>,
+    ) -> Result<()> {
+        self.in_second_tab(async move || {
+            self.wait_window(window).await?;
+            run().await
+        })
+        .await
+    }
+
+    /// [`Self::in_second_window`], [waiting for `window`](Self::wait_window)
+    /// there before `run`.
+    pub async fn in_new_window(
+        &self,
+        window: &str,
+        run: impl AsyncFnOnce() -> Result<()>,
+    ) -> Result<()> {
+        self.in_second_window(async move || {
+            self.wait_window(window).await?;
+            run().await
+        })
+        .await
     }
 
     async fn in_second_context(
@@ -143,4 +252,8 @@ impl TestDriver {
             Err(error) => Err(with_cleanup(error, cleanup)),
         }
     }
+}
+
+fn css_string(value: &str) -> String {
+    format!("'{}'", value.replace('\\', "\\\\").replace('\'', "\\'"))
 }
