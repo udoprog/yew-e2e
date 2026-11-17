@@ -107,8 +107,10 @@
 //! By default the fixture's frontend is built once per run with `trunk build`, in
 //! the workspace root, into `target/e2e-dist`. [`dist()`] says where it is, for
 //! the fixture to serve. [`Frontend::Trunk(dir)`] runs it somewhere else under
-//! the workspace root, and [`Frontend::None`] builds nothing, for a fixture that
-//! serves its own pages.
+//! the workspace root, [`Frontend::Trug(dir)`] does the same with `trug build`
+//! for an app built with [trug], and [`Frontend::None`] builds nothing, for a
+//! fixture that serves its own pages. `E2E_DIST` names a frontend already built,
+//! to serve in place of building one.
 //!
 //! Everything else a run leaves behind goes under the build directory too: the
 //! record of every run in `target/e2e-sessions`, the run lock, a fetched
@@ -159,10 +161,12 @@
 //! [`Fixture`]: https://docs.rs/yew-e2e/latest/yew_e2e/trait.Fixture.html
 //! [`Frontend::None`]: https://docs.rs/yew-e2e/latest/yew_e2e/enum.Frontend.html#variant.None
 //! [`Frontend::Trunk(dir)`]: https://docs.rs/yew-e2e/latest/yew_e2e/enum.Frontend.html#variant.Trunk
+//! [`Frontend::Trug(dir)`]: https://docs.rs/yew-e2e/latest/yew_e2e/enum.Frontend.html#variant.Trug
 //! [`harness!`]: https://docs.rs/yew-e2e/latest/yew_e2e/macro.harness.html
 //! [`TestDriver::snapshot`]: https://docs.rs/yew-e2e/latest/yew_e2e/struct.TestDriver.html#method.snapshot
 //! [`TestDriver`]: https://docs.rs/yew-e2e/latest/yew_e2e/struct.TestDriver.html
 //! [Trunk]: https://trunkrs.dev
+//! [trug]: https://github.com/udoprog/trug
 //! [Yew]: https://yew.rs
 
 #![warn(missing_docs)]
@@ -306,4 +310,8 @@ pub enum Frontend {
     /// into `e2e-dist` under the build directory. `E2E_DIST` names a frontend
     /// already built in its place.
     Trunk(PathBuf),
+    /// `trug build` run in this directory, relative to the workspace root,
+    /// into `e2e-dist` under the build directory. `E2E_DIST` names a frontend
+    /// already built in its place.
+    Trug(PathBuf),
 }

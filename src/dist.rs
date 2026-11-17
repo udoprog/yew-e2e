@@ -25,13 +25,23 @@ pub(crate) async fn build(frontend: &Frontend) -> Result<()> {
         return Ok(());
     }
 
-    let Frontend::Trunk(dir) = frontend else {
+    let Some((tool, dir)) = builder(frontend) else {
         return Ok(());
     };
 
-    let dist = resolve(dir).await?;
+    let dist = resolve(tool, dir).await?;
     let _ = DIST.set(dist);
     Ok(())
+}
+
+/// The tool that builds a frontend and the directory it runs in, if it has one
+/// to build.
+fn builder(frontend: &Frontend) -> Option<(&'static str, &Path)> {
+    match frontend {
+        Frontend::None => None,
+        Frontend::Trunk(dir) => Some(("trunk", dir)),
+        Frontend::Trug(dir) => Some(("trug", dir)),
+    }
 }
 
 /// The build's own target directory, which is where everything the suite leaves
@@ -91,7 +101,7 @@ fn is_root(dir: &Path) -> bool {
     manifest.lines().any(|line| line.trim() == "[workspace]")
 }
 
-async fn resolve(dir: &Path) -> Result<PathBuf> {
+async fn resolve(tool: &str, dir: &Path) -> Result<PathBuf> {
     if let Some(given) = std::env::var_os("E2E_DIST") {
         let given = PathBuf::from(given);
 
@@ -112,17 +122,17 @@ async fn resolve(dir: &Path) -> Result<PathBuf> {
 
     println!("building the frontend into {}", dist.display());
 
-    let status = Command::new("trunk")
+    let status = Command::new(tool)
         .current_dir(&root)
         .arg("build")
         .arg("--dist")
         .arg(&dist)
         .status()
         .await
-        .context("running `trunk build`, is trunk installed?")?;
+        .with_context(|| format!("running `{tool} build`, is {tool} installed?"))?;
 
     if !status.success() {
-        bail!("`trunk build` failed: {status}");
+        bail!("`{tool} build` failed: {status}");
     }
 
     Ok(dist)
@@ -131,9 +141,10 @@ async fn resolve(dir: &Path) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
-    use super::{is_root, package, search};
+    use super::{builder, is_root, package, search};
+    use crate::Frontend;
 
     /// A tree shaped like a workspace: the manifest declaring it, and a
     /// package nested under it with a manifest of its own.
@@ -217,5 +228,22 @@ mod tests {
         fs::create_dir_all(at.join("Cargo.toml")).expect("making a directory");
 
         assert!(!is_root(at));
+    }
+
+    /// Trunk and trug are built the same way, by the tool of their own name
+    /// in the directory given.
+    #[test]
+    fn each_frontend_names_its_tool() {
+        let dir = PathBuf::from("web");
+
+        assert_eq!(builder(&Frontend::None), None);
+        assert_eq!(
+            builder(&Frontend::Trunk(dir.clone())),
+            Some(("trunk", dir.as_path()))
+        );
+        assert_eq!(
+            builder(&Frontend::Trug(dir.clone())),
+            Some(("trug", dir.as_path()))
+        );
     }
 }
