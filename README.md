@@ -18,8 +18,8 @@ What the runner takes care of:
 * Firefox through `geckodriver` or Chrome through `chromedriver`, with a
   `chromedriver` matching the installed Chrome fetched when none is on the
   `PATH`.
-* The frontend built once per run with `trunk build`, or served from `E2E_DIST`
-  when it is already built.
+* The frontend built once per run with `trunk build` or `trug build`, or served
+  from `E2E_DIST` when it is already built.
 * A record of every run, so `--last-session` runs only what did not pass.
 * One run at a time per build directory (`--lock`).
 * Waits that say what they were waiting for when they give up, and a report of
