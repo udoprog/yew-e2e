@@ -55,15 +55,36 @@ pub(crate) fn bounded(timeout: Duration) -> Duration {
 /// stale: the element it named was taken out of the page, as a redraw does
 /// between a lookup and a read of what it found.
 pub(crate) fn is_stale(error: &anyhow::Error) -> bool {
+    said(error, |inner| {
+        matches!(
+            inner,
+            thirtyfour::error::WebDriverErrorInner::StaleElementReference(..)
+        )
+    })
+}
+
+/// Whether `error` is, or was caused by, WebDriver saying a click was
+/// intercepted: another element, such as a sticky bar, is on top of the point
+/// the click would land on.
+pub(crate) fn is_intercepted(error: &anyhow::Error) -> bool {
+    said(error, |inner| {
+        matches!(
+            inner,
+            thirtyfour::error::WebDriverErrorInner::ElementClickIntercepted(..)
+        )
+    })
+}
+
+/// Whether anything in `error`'s chain is a WebDriver error `matches` agrees
+/// with.
+fn said(
+    error: &anyhow::Error,
+    matches: impl Fn(&thirtyfour::error::WebDriverErrorInner) -> bool,
+) -> bool {
     error.chain().any(|cause| {
         cause
             .downcast_ref::<thirtyfour::error::WebDriverError>()
-            .is_some_and(|error| {
-                matches!(
-                    error.as_inner(),
-                    thirtyfour::error::WebDriverErrorInner::StaleElementReference(..)
-                )
-            })
+            .is_some_and(|error| matches(error.as_inner()))
     })
 }
 
@@ -387,18 +408,81 @@ macro_rules! common {
                 self.wait_timeout,
                 || format!("Timed out after {:?} waiting for {by}", self.wait_timeout),
                 async || {
-                let items = self.find_all(by.clone()).await?;
+                    let items = self.find_all(by.clone()).await?;
 
-                ensure!(
-                    items.len() <= 1,
-                    "Expected exactly one by {by}, but got {}: where several is \
-                     what the page is, ask for one of them by index with \
-                     find_nth, or for the first of them with find_first",
-                    items.len()
-                );
+                    ensure!(
+                        items.len() <= 1,
+                        "Expected exactly one by {by}, but got {}: where several is \
+                         what the page is, ask for one of them by index with \
+                         find_nth, or for the first of them with find_first",
+                        items.len()
+                    );
 
-                Ok(items.into_iter().next())
-            })
+                    Ok(items.into_iter().next())
+                },
+            )
+            .await
+        }
+
+        /// **Find the one element matching `by` and run `act` on it**, finding
+        /// it again and running `act` again whenever the page redraws it
+        /// first.
+        ///
+        /// A handle found before a redraw names an element that has left the
+        /// page, and anything done with it fails as stale; this is how to do
+        /// several things to one element of a page that redraws without
+        /// writing that retry by hand. Only a stale handle is retried: any
+        /// other error `act` gives is passed on at once, so `act` should be
+        /// safe to run again up to the point the page took the element away.
+        ///
+        /// Waits for the element to appear, and gives up under the wait
+        /// timeout naming `by`, with the last stale error attached. Like
+        /// [`Self::find_one_by`], a second match is refused rather than picked
+        /// from.
+        ///
+        /// # Examples
+        ///
+        /// ```no_run
+        /// use yew_e2e::prelude::*;
+        ///
+        /// async fn rename(driver: &TestDriver) -> Result<String> {
+        ///     driver
+        ///         .with_one("[data-test=name]", async |field| {
+        ///             field.clear().await?;
+        ///             field.send_keys("Ada").await?;
+        ///             field.value().await
+        ///         })
+        ///         .await
+        /// }
+        /// ```
+        pub async fn with_one<T>(
+            &self,
+            by: impl IntoBy,
+            mut act: impl AsyncFnMut(&TestElement) -> Result<T>,
+        ) -> Result<T> {
+            let by = by.into_by();
+
+            tracing::trace!(?by, "Acting on one element");
+
+            crate::finding::poll(
+                self.wait_timeout,
+                || format!("Timed out after {:?} acting on {by}", self.wait_timeout),
+                async || {
+                    let items = self.find_all(by.clone()).await?;
+
+                    ensure!(
+                        items.len() <= 1,
+                        "Expected exactly one by {by} to act on, but got {}: \
+                         where several is what the page is, name the one meant",
+                        items.len()
+                    );
+
+                    match items.first() {
+                        Some(item) => Ok(Some(act(item).await?)),
+                        None => Ok(None),
+                    }
+                },
+            )
             .await
         }
 
@@ -533,7 +617,7 @@ mod tests {
     use thirtyfour::error::{WebDriverError, WebDriverErrorInfo, WebDriverErrorInner};
     use tokio::time::{self, Duration, Instant};
 
-    use super::{OutOfTime, bounded, is_stale, poll};
+    use super::{OutOfTime, bounded, is_intercepted, is_stale, poll};
 
     /// A lookup that takes `takes` to answer, bounded as `find_all_within`
     /// bounds one.
@@ -675,6 +759,23 @@ mod tests {
         );
         assert!(said.ends_with(": the poll timed out"), "{said}");
         Ok(())
+    }
+
+    #[test]
+    fn only_an_intercepted_click_is_intercepted() {
+        let intercepted = || {
+            anyhow::Error::from(WebDriverError::from(
+                WebDriverErrorInner::ElementClickIntercepted(WebDriverErrorInfo::new(
+                    String::from("element click intercepted"),
+                )),
+            ))
+        };
+
+        assert!(is_intercepted(&intercepted()));
+        assert!(is_intercepted(&intercepted().context("pressing the row")));
+        assert!(!is_intercepted(&stale()));
+        assert!(!is_stale(&intercepted()));
+        assert!(!is_intercepted(&anyhow!("element click intercepted")));
     }
 
     #[test]

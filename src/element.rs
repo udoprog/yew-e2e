@@ -282,6 +282,24 @@ impl TestElement {
         Ok(())
     }
 
+    /// **Bring the element to the middle of the window**, and of every box
+    /// that scrolls it, rather than to whichever edge is nearest as
+    /// [`Self::scroll_into_view`] and a WebDriver click do. At an edge a
+    /// sticky header or a fixed bottom bar can be on top of it; in the middle
+    /// it is clear of both.
+    pub async fn scroll_to_center(&self) -> Result<()> {
+        tracing::trace!("Scrolling element to the centre");
+
+        let script = "arguments[0].scrollIntoView({ block: 'center', inline: 'center' });";
+
+        self.inner
+            .handle()
+            .execute(script, vec![self.inner.to_json()?])
+            .await?;
+
+        Ok(())
+    }
+
     /// Put keyboard focus here without pressing anything.
     pub async fn focus(&self) -> Result<()> {
         tracing::trace!("Focusing element");

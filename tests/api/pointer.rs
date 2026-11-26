@@ -1,6 +1,7 @@
 //! Presses (`click`, `extend_click`, `shift_click`, `click_by`,
 //! `double_click`, `double_click_by`, `context_click`, `hover`,
-//! `middle_click`, `press_nth`, `context_press_nth`) and held drags
+//! `middle_click`, `press_nth`, `context_press_nth`, `press_containing`,
+//! `scroll_to_center`) and held drags
 //! (`drag_by`, `drag_from_by`, `alt_drag_by`, `move_held`, `drop_held`,
 //! `drop_held_alt`, `cancel_pointer`, `release_all_input`, `middle_drag_by`,
 //! `pointer_drag_onto`).
@@ -8,6 +9,27 @@
 use yew_e2e::prelude::*;
 
 use crate::{Page, Pages, logged, logged_exactly};
+
+/// A page taller than the window with a bar fixed along its bottom, which a
+/// press on an element scrolled only as far as the window's edge lands on
+/// instead.
+pub const STICKY: Page = Page {
+    name: "sticky",
+    body: r##"
+<style>
+[data-test=bar] { position: fixed; left: 0; right: 0; bottom: 0; height: 160px; background: #888; z-index: 10; }
+.tall { height: 3000px; }
+</style>
+<div class="tall"></div>
+<button data-test="below">below</button>
+<div class="tall"></div>
+<div data-test="bar">bar</div>
+"##,
+    script: r##"
+document.querySelector("[data-test=below]").addEventListener("click", () => record("pressed below"));
+document.querySelector("[data-test=bar]").addEventListener("click", () => record("pressed bar"));
+"##,
+};
 
 pub const PAGE: Page = Page {
     name: "pointer",
@@ -194,6 +216,90 @@ pub async fn context_press_nth_right_clicks_by_index(
 
     driver.context_press_nth("[data-test=item]", 1).await?;
     logged_exactly(driver, ["context two"]).await
+}
+
+pub async fn press_containing_presses_the_one_with_the_text(
+    driver: &mut TestDriver,
+    pages: &mut Pages,
+) -> Result<()> {
+    pages.open(driver, &PAGE).await?;
+
+    driver.press_containing("[data-test=item]", "tw").await?;
+    driver.press_containing("[data-test=item]", "one").await?;
+    logged_exactly(driver, ["pressed two", "pressed one"]).await
+}
+
+pub async fn press_containing_refuses_several(
+    driver: &mut TestDriver,
+    pages: &mut Pages,
+) -> Result<()> {
+    pages.open(driver, &PAGE).await?;
+
+    let Err(error) = driver.press_containing("[data-test=item]", "o").await else {
+        bail!("one of two buttons containing the text was pressed");
+    };
+
+    ensure!(
+        error.to_string().contains("but got 2"),
+        "the refusal said {error:#}"
+    );
+
+    let log = crate::log(driver).await?;
+    ensure!(log.is_empty(), "a refused press pressed: {log:?}");
+    Ok(())
+}
+
+pub async fn press_containing_gives_up_naming_the_text(
+    driver: &mut TestDriver,
+    pages: &mut Pages,
+) -> Result<()> {
+    pages.open(driver, &PAGE).await?;
+
+    let Err(error) = driver.press_containing("[data-test=item]", "three").await else {
+        bail!("a button with a text no button has was pressed");
+    };
+
+    let said = error.to_string();
+    ensure!(
+        said.starts_with("Timed out after")
+            && said.contains("[data-test=item]")
+            && said.ends_with(r#"containing "three""#),
+        "the timeout said {said:?}"
+    );
+    Ok(())
+}
+
+/// A press WebDriver scrolls to the window's edge, under a bar fixed there,
+/// lands once the element is brought to the middle.
+pub async fn press_nth_clears_a_fixed_bar(
+    driver: &mut TestDriver,
+    pages: &mut Pages,
+) -> Result<()> {
+    pages.open(driver, &STICKY).await?;
+
+    driver.press_nth("[data-test=below]", 0).await?;
+    logged_exactly(driver, ["pressed below"]).await
+}
+
+pub async fn scroll_to_center_brings_an_element_to_the_middle(
+    driver: &mut TestDriver,
+    pages: &mut Pages,
+) -> Result<()> {
+    pages.open(driver, &STICKY).await?;
+
+    let below = driver.find_one_by("[data-test=below]").await?;
+    below.scroll_to_center().await?;
+
+    let script = "const box = arguments[0].getBoundingClientRect(); \
+         return [box.top + box.height / 2, innerHeight / 2];";
+
+    let answer = driver
+        .webdriver()
+        .execute(script, vec![below.element().to_json()?])
+        .await?;
+
+    let [middle, half] = serde_json::from_value::<[f64; 2]>(answer.json().clone())?;
+    crate::near("the element's middle", middle, half, 2.0)
 }
 
 /// A press that never lands gives up with what the browser said about the

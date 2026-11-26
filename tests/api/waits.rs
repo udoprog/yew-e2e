@@ -1,6 +1,6 @@
 //! `wait_until`, `wait_until_within`, `wait_texts`, `wait_text`,
-//! `wait_text_contains`, `wait_count`, `wait_count_from`, `count`, and the
-//! timeouts they wait against.
+//! `wait_text_contains`, `wait_count`, `wait_count_from`, `count`,
+//! `with_one`, and the timeouts they wait against.
 
 use std::cell::Cell;
 use std::time::{Duration, Instant};
@@ -242,6 +242,103 @@ pub async fn wait_until_looks_again_after_a_stale_element(
         attempts.get() == 2,
         "the stale read took {} attempts",
         attempts.get()
+    );
+    Ok(())
+}
+
+pub async fn with_one_acts_again_on_an_element_a_redraw_replaced(
+    driver: &mut TestDriver,
+    pages: &mut Pages,
+) -> Result<()> {
+    pages.open(driver, &PAGE).await?;
+
+    let attempts = Cell::new(0);
+
+    let text = driver
+        .with_one("[data-test=swap]", async |swap| {
+            attempts.set(attempts.get() + 1);
+            // The first press replaces the paragraph under the handle.
+            driver.press_nth("[data-test=replace]", 0).await?;
+            swap.text().await
+        })
+        .await?;
+
+    ensure!(text == "second", "read {text:?} through the redraw");
+    ensure!(
+        attempts.get() == 2,
+        "the stale read took {} attempts",
+        attempts.get()
+    );
+    Ok(())
+}
+
+pub async fn with_one_passes_on_any_other_error_at_once(
+    driver: &mut TestDriver,
+    pages: &mut Pages,
+) -> Result<()> {
+    pages.open(driver, &PAGE).await?;
+
+    let attempts = Cell::new(0);
+
+    let result = driver
+        .with_one("[data-test=swap]", async |_| -> Result<()> {
+            attempts.set(attempts.get() + 1);
+            bail!("broken")
+        })
+        .await;
+
+    let Err(error) = result else {
+        bail!("an act that fails passed");
+    };
+
+    ensure!(error.to_string() == "broken", "the error said {error:#}");
+    ensure!(
+        attempts.get() == 1,
+        "a failing act ran {} times",
+        attempts.get()
+    );
+    Ok(())
+}
+
+pub async fn with_one_refuses_several(driver: &mut TestDriver, pages: &mut Pages) -> Result<()> {
+    pages.open(driver, &PAGE).await?;
+
+    driver.press_nth("[data-test=add]", 0).await?;
+    driver.wait_count("[data-test=items] li", 2).await?;
+
+    let Err(error) = driver
+        .with_one("[data-test=items] li", async |item| item.text().await)
+        .await
+    else {
+        bail!("one of several was acted on");
+    };
+
+    ensure!(
+        error.to_string().contains("but got 2"),
+        "the refusal said {error:#}"
+    );
+    Ok(())
+}
+
+pub async fn with_one_gives_up_naming_what_it_looked_for(
+    driver: &mut TestDriver,
+    pages: &mut Pages,
+) -> Result<()> {
+    pages.open(driver, &PAGE).await?;
+
+    let Err(error) = driver
+        .with_one("[data-test=nothing]", async |item| item.text().await)
+        .await
+    else {
+        bail!("nothing was acted on");
+    };
+
+    let said = error.to_string();
+    ensure!(
+        said.starts_with("Timed out after")
+            && said.contains("acting on")
+            && said.contains("[data-test=nothing]"),
+        "the timeout said {said:?}"
     );
     Ok(())
 }

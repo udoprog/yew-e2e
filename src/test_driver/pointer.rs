@@ -1,9 +1,9 @@
 //! Pressing, holding and letting go with the pointer.
 
-use anyhow::Result;
+use anyhow::{Result, ensure};
 use thirtyfour::By;
 
-use crate::finding::{OutOfTime, poll};
+use crate::finding::{OutOfTime, is_intercepted, poll};
 use crate::{IntoBy, TestDriver, TestElement};
 
 impl TestDriver {
@@ -148,6 +148,50 @@ impl TestDriver {
         .await
     }
 
+    /// **Press the one element matching `by` whose text contains `text`**,
+    /// waiting for it, and re-finding it if the page moves underneath, as
+    /// [`TestDriver::press_nth`] does.
+    ///
+    /// For a list of buttons told apart only by what they say. Like
+    /// [`TestDriver::find_one_by`], a second match is refused rather than
+    /// picked from: a text that names two of them was never naming one.
+    pub async fn press_containing(&self, by: impl IntoBy, text: &str) -> Result<()> {
+        let by = by.into_by();
+
+        tracing::trace!(?by, text, "Pressing element containing text");
+
+        let timeout = format!(
+            "Timed out after {:?} pressing {by} containing {text:?}",
+            self.wait_timeout
+        );
+
+        self.press_with(
+            timeout,
+            async || {
+                let mut found = None;
+                let mut matched = 0;
+
+                for item in self.find_all(by.clone()).await? {
+                    if item.text().await?.contains(text) {
+                        matched += 1;
+                        found = Some(item);
+                    }
+                }
+
+                ensure!(
+                    matched <= 1,
+                    "Expected exactly one by {by} containing {text:?}, but got \
+                     {matched}: where several is what the page is, say more of \
+                     the text, or press one of them by index with press_nth"
+                );
+
+                Ok(found)
+            },
+            async |item| item.click().await,
+        )
+        .await
+    }
+
     /// Press the `index`th element matching `by` with `press` until it lands,
     /// giving up with what the last attempt said under a timeout saying what
     /// `doing` was.
@@ -158,21 +202,48 @@ impl TestDriver {
         doing: &str,
         press: impl AsyncFn(&TestElement) -> Result<()>,
     ) -> Result<()> {
-        let mut refused = None;
-
         let timeout = format!(
             "Timed out after {:?} {doing} {by} at {index}",
             self.wait_timeout
         );
 
+        self.press_with(
+            timeout,
+            async || Ok(self.find_all(by.clone()).await?.into_iter().nth(index)),
+            press,
+        )
+        .await
+    }
+
+    /// Press what `find` answers with `press` until it lands, finding it
+    /// afresh for every attempt, and giving up under `timeout` with what the
+    /// last attempt said.
+    ///
+    /// A press another element took instead, as a sticky bar takes one on an
+    /// element WebDriver scrolled to the window's edge, brings the element to
+    /// the middle of the window before the next attempt.
+    async fn press_with(
+        &self,
+        timeout: String,
+        find: impl AsyncFn() -> Result<Option<TestElement>>,
+        press: impl AsyncFn(&TestElement) -> Result<()>,
+    ) -> Result<()> {
+        let mut refused = None;
+
         let pressed = poll(
             self.wait_timeout,
             || timeout.clone(),
             async || {
-                if let Some(item) = self.find_all(by.clone()).await?.get(index) {
-                    match press(item).await {
+                if let Some(item) = find().await? {
+                    match press(&item).await {
                         Ok(()) => return Ok(Some(())),
-                        Err(error) => refused = Some(error),
+                        Err(error) => {
+                            if is_intercepted(&error) {
+                                item.scroll_to_center().await?;
+                            }
+
+                            refused = Some(error);
+                        }
                     }
                 }
 
