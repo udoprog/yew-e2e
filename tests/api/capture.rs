@@ -1,4 +1,5 @@
-//! `screenshot_png`, `screenshot`, `snapshot` and `downloads`.
+//! `screenshot_png` (of the page, and of the frame `in_frame` entered), `screenshot`, `snapshot`
+//! and `downloads`.
 
 use std::path::PathBuf;
 
@@ -26,6 +27,48 @@ pub async fn screenshot_png_is_a_png(driver: &mut TestDriver, pages: &mut Pages)
         "not a PNG: {:?}",
         &png[..png.len().min(8)]
     );
+    Ok(())
+}
+
+/// The width and height a PNG's header gives.
+fn png_size(png: &[u8]) -> Result<(u32, u32)> {
+    let header = png.get(16..24).context("a PNG too short for its header")?;
+    let width = u32::from_be_bytes(header[..4].try_into()?);
+    let height = u32::from_be_bytes(header[4..].try_into()?);
+    Ok((width, height))
+}
+
+pub async fn screenshot_png_in_a_frame_takes_the_frame(
+    driver: &mut TestDriver,
+    pages: &mut Pages,
+) -> Result<()> {
+    pages.open(driver, &PAGE).await?;
+
+    let scale = crate::eval(driver, "return window.devicePixelRatio")
+        .await?
+        .as_f64()
+        .context("the device pixel ratio")?;
+    let whole = png_size(&driver.screenshot_png().await?)?;
+
+    driver.in_frame(390, 600).await?;
+    let png = driver.screenshot_png().await?;
+    ensure!(png.starts_with(PNG), "not a PNG");
+
+    let framed = png_size(&png)?;
+    let expected = ((390.0 * scale).round(), (600.0 * scale).round());
+    ensure!(
+        (f64::from(framed.0), f64::from(framed.1)) == expected,
+        "the frame's screenshot is {framed:?}, not {expected:?}; the whole window's was {whole:?}"
+    );
+
+    driver.snapshot("api-capture-frame").await?;
+
+    // The driver is still in the frame.
+    ensure!(
+        crate::eval(driver, "return window.self !== window.top").await? == true,
+        "the screenshot left the frame"
+    );
+    driver.find_one_by("h1").await?;
     Ok(())
 }
 

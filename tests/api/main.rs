@@ -25,6 +25,7 @@ mod canvas;
 mod capture;
 mod drag;
 mod finding;
+mod frame;
 mod input;
 mod keyboard;
 mod marks;
@@ -54,6 +55,7 @@ const PAGES: &[&Page] = &[
     &capture::PAGE,
     &drag::PAGE,
     &finding::PAGE,
+    &frame::PAGE,
     &input::PAGE,
     &keyboard::PAGE,
     &marks::PAGE,
@@ -398,6 +400,16 @@ mod suite {
             what_the_page_says_describes_the_page,
             local_clock_reads_the_browser_clock,
         },
+        frame::{
+            in_frame_shows_the_page_at_the_frames_size,
+            in_frame_keeps_the_watch,
+            in_frame_leaves_an_unwatched_test_unwatched,
+            in_frame_at_opens_a_path_on_the_page_origin,
+            in_frame_again_reopens_the_page_in_the_frame,
+            in_frame_at_refuses_another_origin,
+            leave_frame_opens_the_page_in_the_window,
+            leave_frame_refuses_outside_a_frame,
+        },
         marks::{
             page_kept_tells_client_side_navigation_from_reload,
             kept_marked_counts_elements_a_render_kept,
@@ -437,6 +449,7 @@ mod suite {
         },
         capture::{
             screenshot_png_is_a_png,
+            screenshot_png_in_a_frame_takes_the_frame,
             screenshot_writes_a_file,
             snapshot_follows_e2e_shots,
             downloads_collects_saved_files,
