@@ -27,6 +27,7 @@ mod drag;
 mod finding;
 mod input;
 mod keyboard;
+mod marks;
 mod navigation;
 mod pointer;
 mod scripts;
@@ -55,6 +56,7 @@ const PAGES: &[&Page] = &[
     &finding::PAGE,
     &input::PAGE,
     &keyboard::PAGE,
+    &marks::PAGE,
     &navigation::PAGE,
     &pointer::PAGE,
     &scripts::PAGE,
@@ -390,6 +392,11 @@ mod suite {
             what_the_page_says_describes_the_page,
             local_clock_reads_the_browser_clock,
         },
+        marks::{
+            page_kept_tells_client_side_navigation_from_reload,
+            kept_marked_counts_elements_a_render_kept,
+            mark_takes_any_by,
+        },
         storage::{
             local_storage_round_trips,
             block_local_storage_denies_the_page,
@@ -411,6 +418,8 @@ mod suite {
             reduced_motion_reads_the_media_query,
             painted_color_alpha_and_color_shift_measure_colour,
             overflowing_finds_clipped_boxes,
+            page_overflow_measures_the_page_sideways,
+            clipped_sees_text_cut_off,
             small_text_finds_small_text,
             small_text_takes_marks_as_given_and_refuses_an_unfinite_floor,
         },

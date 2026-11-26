@@ -1,7 +1,7 @@
 //! [`TestElement`], one element a lookup found.
 
-use anyhow::Result;
 use anyhow::ensure;
+use anyhow::{Context, Result};
 use thirtyfour::common::types::ElementRect;
 use thirtyfour::prelude::*;
 use tokio::time::{self, Duration};
@@ -306,6 +306,27 @@ impl TestElement {
             .await?;
 
         Ok(value.json().as_str().unwrap_or_default().to_string())
+    }
+
+    /// **Whether the element has more to show sideways than it has room for**:
+    /// its content is wider than its box by more than a pixel, as a line of
+    /// text cut off or ellipsized is. The pixel spares the rounding a box of
+    /// fractional width reads with.
+    pub async fn clipped(&self) -> Result<bool> {
+        tracing::trace!("Asking whether an element clips its content");
+
+        let script = "return arguments[0].scrollWidth > arguments[0].clientWidth + 1;";
+
+        let value = self
+            .inner
+            .handle()
+            .execute(script, vec![self.inner.to_json()?])
+            .await?;
+
+        value
+            .json()
+            .as_bool()
+            .context("whether the element clips its content")
     }
 
     /// The element's `value` property.

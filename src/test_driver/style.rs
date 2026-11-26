@@ -89,6 +89,26 @@ impl TestDriver {
             .collect())
     }
 
+    /// **How many pixels the document is wider than the window**, zero when
+    /// it fits: what a phone-sized window scrolls sideways by. [`Self::overflowing`]
+    /// cannot see this, since `<html>` is `overflow: visible` and the window,
+    /// not a box in the page, is what scrolls.
+    pub async fn page_overflow(&self) -> Result<u32> {
+        tracing::trace!("Measuring how far the page overflows the window sideways");
+
+        let over = self
+            .inner
+            .execute(
+                "const root = document.documentElement; \
+                 return Math.max(0, root.scrollWidth - root.clientWidth);",
+                Vec::new(),
+            )
+            .await?;
+
+        let over = over.json().as_u64().context("how far the page overflows")?;
+        Ok(u32::try_from(over)?)
+    }
+
     /// **Every piece of text inside an element set smaller than `floor`
     /// pixels**, one line each, passing over whatever sits inside `marks`: the
     /// numbers of a scale or a badge's count, which are read at a glance rather

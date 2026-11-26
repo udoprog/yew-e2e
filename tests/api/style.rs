@@ -1,5 +1,6 @@
 //! `set_style`, `set_class`, `computed`, `animation_time`, `reduced_motion`,
-//! `painted`, `color_alpha`, `color_shift`, `overflowing` and `small_text`.
+//! `painted`, `color_alpha`, `color_shift`, `overflowing`, `page_overflow`,
+//! `clipped` and `small_text`.
 
 use yew_e2e::prelude::*;
 
@@ -200,6 +201,47 @@ pub async fn overflowing_finds_clipped_boxes(
 
     let fits = driver.find_one_by("[data-test=fits]").await?;
     ensure!(driver.overflowing(&fits).await?.is_empty());
+    Ok(())
+}
+
+pub async fn page_overflow_measures_the_page_sideways(
+    driver: &mut TestDriver,
+    pages: &mut Pages,
+) -> Result<()> {
+    pages.open(driver, &PAGE).await?;
+
+    let over = driver.page_overflow().await?;
+    ensure!(over == 0, "a page that fits overflows by {over}");
+
+    let fits = driver.find_one_by("[data-test=fits]").await?;
+    driver.set_style(&fits, "width", "5000px").await?;
+
+    let window = eval(driver, "return document.documentElement.clientWidth").await?;
+    let window = window.as_f64().context("the window's width")?;
+    let left = fits.rect().await?.x;
+
+    let over = driver.page_overflow().await?;
+    near(
+        "the page's overflow",
+        f64::from(over),
+        left + 5000.0 - window,
+        1.0,
+    )?;
+
+    driver.set_style(&fits, "width", "400px").await?;
+    let over = driver.page_overflow().await?;
+    ensure!(over == 0, "a page that fits again overflows by {over}");
+    Ok(())
+}
+
+pub async fn clipped_sees_text_cut_off(driver: &mut TestDriver, pages: &mut Pages) -> Result<()> {
+    pages.open(driver, &PAGE).await?;
+
+    let clip = driver.find_one_by("[data-test=clip]").await?;
+    ensure!(clip.clipped().await?, "a cut-off line is not clipped");
+
+    let fits = driver.find_one_by("[data-test=fits]").await?;
+    ensure!(!fits.clipped().await?, "a line that fits is clipped");
     Ok(())
 }
 

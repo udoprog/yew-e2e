@@ -16,6 +16,7 @@ mod capture;
 mod drag;
 mod input;
 mod keyboard;
+mod marks;
 mod navigation;
 mod pointer;
 mod scripts;
