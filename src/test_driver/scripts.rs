@@ -3,7 +3,7 @@
 
 use std::sync::atomic::Ordering;
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 
 use crate::{TestDriver, TestElement};
 
@@ -157,6 +157,17 @@ impl TestDriver {
         let seen = body.attr("data-threw").await?;
 
         Ok((!seen.is_empty()).then_some(seen))
+    }
+
+    /// **Fail if the page threw** since [`Self::watch_for_errors`], saying
+    /// what it threw. The runner asks the same once a test has passed; this
+    /// is for asking it at a point of the test's own choosing, such as before
+    /// a step that would hide what went wrong.
+    pub async fn ensure_no_errors(&self) -> Result<()> {
+        match self.error_seen().await? {
+            Some(threw) => bail!("the page threw: {threw}"),
+            None => Ok(()),
+        }
     }
 
     /// **Start counting what changes in the document under `element`**: every

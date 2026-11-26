@@ -1,4 +1,5 @@
 //! What is injected into the page: `watch_for_errors`, `error_seen`,
+//! `ensure_no_errors`,
 //! `capture_clipboard`, `wait_copied`, `delay_websocket_sends`,
 //! `stop_delaying_websocket_sends`, `watch_mutations` and `mutations`.
 
@@ -106,6 +107,30 @@ pub async fn watch_for_errors_hears_a_throw(
     driver.press_nth("[data-test=complain]", 0).await?;
     threw(driver, "complained 1").await?;
     forget_the_throw(driver).await
+}
+
+pub async fn ensure_no_errors_fails_on_what_the_page_threw(
+    driver: &mut TestDriver,
+    pages: &mut Pages,
+) -> Result<()> {
+    pages.open(driver, &PAGE).await?;
+
+    driver.ensure_no_errors().await?;
+
+    driver.press_nth("[data-test=throw]", 0).await?;
+    threw(driver, "Error: boom").await?;
+
+    let Err(error) = driver.ensure_no_errors().await else {
+        bail!("a page that threw passed");
+    };
+
+    ensure!(
+        error.to_string().starts_with("the page threw: ") && error.to_string().contains("boom"),
+        "the failure said {error:#}"
+    );
+
+    forget_the_throw(driver).await?;
+    driver.ensure_no_errors().await
 }
 
 pub async fn watch_for_errors_hears_a_rejection(

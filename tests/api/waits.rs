@@ -1,5 +1,6 @@
-//! `wait_until`, `wait_until_within`, `wait_texts`, `wait_count`,
-//! `wait_count_from`, `count`, and the timeouts they wait against.
+//! `wait_until`, `wait_until_within`, `wait_texts`, `wait_text`,
+//! `wait_text_contains`, `wait_count`, `wait_count_from`, `count`, and the
+//! timeouts they wait against.
 
 use std::cell::Cell;
 use std::time::{Duration, Instant};
@@ -15,6 +16,10 @@ pub const PAGE: Page = Page {
 <ul data-test="items"><li>one</li></ul>
 <button data-test="add">Add</button>
 <p data-test="late" hidden>late</p>
+<p data-test="status">idle</p>
+<button data-test="work">Work</button>
+<p data-test="swap">first</p>
+<button data-test="replace">Replace</button>
 "##,
     script: r##"
 document.querySelector("[data-test=add]").addEventListener("click", () => {
@@ -25,6 +30,25 @@ document.querySelector("[data-test=add]").addEventListener("click", () => {
     }, 200);
 });
 setTimeout(() => { document.querySelector("[data-test=late]").hidden = false; }, 300);
+document.querySelector("[data-test=work]").addEventListener("click", () => {
+    const status = document.querySelector("[data-test=status]");
+    setTimeout(() => {
+        const replaced = document.createElement("p");
+        replaced.dataset.test = "status";
+        replaced.textContent = "working: 1 of 2";
+        status.replaceWith(replaced);
+    }, 100);
+    setTimeout(() => { document.querySelector("[data-test=status]").textContent = "done"; }, 300);
+});
+let replaced = false;
+document.querySelector("[data-test=replace]").addEventListener("click", () => {
+    if (replaced) { return; }
+    replaced = true;
+    const swap = document.createElement("p");
+    swap.dataset.test = "swap";
+    swap.textContent = "second";
+    document.querySelector("[data-test=swap]").replaceWith(swap);
+});
 "##,
 };
 
@@ -192,6 +216,105 @@ pub async fn wait_texts_gives_up_saying_what_it_last_read(
     Ok(())
 }
 
+pub async fn wait_until_looks_again_after_a_stale_element(
+    driver: &mut TestDriver,
+    pages: &mut Pages,
+) -> Result<()> {
+    pages.open(driver, &PAGE).await?;
+
+    let attempts = Cell::new(0);
+
+    driver
+        .wait_until("the swapped paragraph to read second", async || {
+            attempts.set(attempts.get() + 1);
+            let swap = driver.find_one_by("[data-test=swap]").await?;
+            // The first press replaces the paragraph under the handle.
+            driver
+                .find_one_by("[data-test=replace]")
+                .await?
+                .click()
+                .await?;
+            Ok(swap.text().await? == "second")
+        })
+        .await?;
+
+    ensure!(
+        attempts.get() == 2,
+        "the stale read took {} attempts",
+        attempts.get()
+    );
+    Ok(())
+}
+
+pub async fn wait_text_follows_one_element_through_a_redraw(
+    driver: &mut TestDriver,
+    pages: &mut Pages,
+) -> Result<()> {
+    pages.open(driver, &PAGE).await?;
+
+    driver.wait_text("[data-test=status]", "idle").await?;
+    driver.press_nth("[data-test=work]", 0).await?;
+    driver
+        .wait_text_contains("[data-test=status]", "1 of 2")
+        .await?;
+    driver.wait_text("[data-test=status]", "done").await
+}
+
+pub async fn wait_text_gives_up_saying_what_it_last_read(
+    driver: &mut TestDriver,
+    pages: &mut Pages,
+) -> Result<()> {
+    pages.open(driver, &PAGE).await?;
+
+    let Err(error) = driver.wait_text("[data-test=status]", "busy").await else {
+        bail!("a text that never appears was waited out");
+    };
+
+    let said = format!("{error:#}");
+
+    ensure!(
+        said.starts_with(r#"last read "idle": Timed out after "#)
+            && said.contains("[data-test=status]")
+            && said.ends_with(r#"to read "busy""#),
+        "the timeout said {said:?}"
+    );
+
+    let Err(error) = driver
+        .wait_text_contains("[data-test=nothing]", "busy")
+        .await
+    else {
+        bail!("a text on nothing was waited out");
+    };
+
+    let said = format!("{error:#}");
+
+    ensure!(
+        said.starts_with("nothing matched to read: Timed out after ")
+            && said.ends_with(r#"to contain "busy""#),
+        "the timeout said {said:?}"
+    );
+
+    Ok(())
+}
+
+pub async fn wait_text_refuses_several(driver: &mut TestDriver, pages: &mut Pages) -> Result<()> {
+    pages.open(driver, &PAGE).await?;
+
+    driver.press_nth("[data-test=add]", 0).await?;
+    driver.wait_count("[data-test=items] li", 2).await?;
+
+    let Err(error) = driver.wait_text("[data-test=items] li", "one").await else {
+        bail!("one text of several was accepted");
+    };
+
+    ensure!(
+        error.to_string().contains("but got 2"),
+        "the refusal said {error:#}"
+    );
+
+    Ok(())
+}
+
 pub async fn wait_count_establishes_a_count(
     driver: &mut TestDriver,
     pages: &mut Pages,
@@ -245,6 +368,7 @@ pub async fn element_waits_are_scoped_to_the_element(
 
     driver.press_nth("[data-test=add]", 0).await?;
     items.wait_texts("li", ["one", "two"]).await?;
+    items.wait_text("li:last-child", "two").await?;
     items.wait_count("li", 2).await?;
     ensure!(items.count("button").await? == 0, "the list has a button");
 

@@ -51,23 +51,47 @@ pub(crate) fn bounded(timeout: Duration) -> Duration {
         .unwrap_or(timeout)
 }
 
+/// Whether `error` is, or was caused by, WebDriver saying an element handle is
+/// stale: the element it named was taken out of the page, as a redraw does
+/// between a lookup and a read of what it found.
+pub(crate) fn is_stale(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<thirtyfour::error::WebDriverError>()
+            .is_some_and(|error| {
+                matches!(
+                    error.as_inner(),
+                    thirtyfour::error::WebDriverErrorInner::StaleElementReference(..)
+                )
+            })
+    })
+}
+
 /// **Repeat `attempt` until it answers, or `timeout` passes**, looking again
-/// every [`POLL_INTERVAL`]. `None` is running out of time, for the caller to
-/// say what it was waiting for.
+/// every [`POLL_INTERVAL`]. Running out of time is an [`OutOfTime`] saying
+/// what `waited` says was being waited for.
 ///
 /// A poll inside a wait gives up no later than that wait does, and every
 /// lookup an attempt makes is bounded by what is left of the poll's deadline;
 /// an attempt that failed by running out of that time ran out of time, and is
 /// not a failure of its own.
+///
+/// **An attempt that met a stale element has not answered yet**, rather than
+/// failed: the page redrew between the attempt finding an element and reading
+/// it, and the next attempt finds it afresh. Should the poll run out of time,
+/// the last such error is attached to the timeout, since it may be why.
 pub(crate) async fn poll<T>(
     timeout: Duration,
+    waited: impl FnOnce() -> String,
     mut attempt: impl AsyncFnMut() -> Result<Option<T>>,
-) -> Result<Option<T>> {
+) -> Result<T> {
     let own = Instant::now() + timeout;
     let deadline = DEADLINE.try_with(|outer| own.min(*outer)).unwrap_or(own);
 
-    DEADLINE
-        .scope(deadline, async move {
+    let mut stale = None;
+
+    let found = DEADLINE
+        .scope(deadline, async {
             loop {
                 match attempt().await {
                     Ok(Some(found)) => return Ok(Some(found)),
@@ -75,6 +99,9 @@ pub(crate) async fn poll<T>(
                     Err(error)
                         if error.downcast_ref::<OutOfTime>().is_some()
                             && Instant::now() >= deadline => {}
+                    Err(error) if is_stale(&error) => {
+                        stale = Some(error);
+                    }
                     Err(error) => return Err(error),
                 }
 
@@ -85,7 +112,21 @@ pub(crate) async fn poll<T>(
                 time::sleep(POLL_INTERVAL).await;
             }
         })
-        .await
+        .await?;
+
+    match found {
+        Some(found) => Ok(found),
+        None => {
+            let error = anyhow::Error::from(OutOfTime(waited()));
+
+            Err(match stale {
+                Some(stale) => {
+                    error.context(format!("last attempt met a stale element: {stale:#}"))
+                }
+                None => error,
+            })
+        }
+    }
 }
 
 macro_rules! common {
@@ -124,16 +165,12 @@ macro_rules! common {
         ) -> Result<()> {
             self.waiting.on(&what);
 
-            let held = crate::finding::poll(timeout, async || Ok(condition().await?.then_some(())))
-                .await?;
-
-            match held {
-                Some(()) => Ok(()),
-                None => Err(crate::finding::OutOfTime(format!(
-                    "Timed out after {timeout:?} waiting for {what}"
-                ))
-                .into()),
-            }
+            crate::finding::poll(
+                timeout,
+                || format!("Timed out after {timeout:?} waiting for {what}"),
+                async || Ok(condition().await?.then_some(())),
+            )
+            .await
         }
 
         /// Wait until the text of every node matching `by` reads `expected`.
@@ -164,6 +201,85 @@ macro_rules! common {
                     Err(error.context(format!("last read {seen:?}")))
                 }
             }
+        }
+
+        /// Wait until the one node matching `by` reads exactly `expected`,
+        /// found afresh on every look, so a redraw that replaces it is
+        /// followed rather than failed on.
+        ///
+        /// Giving up says what it last read. Like [`Self::find_one_by`], a
+        /// second match is refused rather than picked from; for several, see
+        /// [`Self::wait_texts`].
+        pub async fn wait_text(&self, by: impl IntoBy, expected: &str) -> Result<()> {
+            let by = by.into_by();
+
+            tracing::trace!(?by, expected, "Waiting for text");
+
+            self.wait_one_text(
+                &by,
+                format_args!("{by} to read {expected:?}"),
+                |text| text == expected,
+            )
+            .await
+        }
+
+        /// The same as [`Self::wait_text`], for the one node matching `by` to
+        /// read something with `part` in it.
+        pub async fn wait_text_contains(&self, by: impl IntoBy, part: &str) -> Result<()> {
+            let by = by.into_by();
+
+            tracing::trace!(?by, part, "Waiting for text containing");
+
+            self.wait_one_text(
+                &by,
+                format_args!("{by} to contain {part:?}"),
+                |text| text.contains(part),
+            )
+            .await
+        }
+
+        /// Wait for the one node matching `by` to read something `matches`
+        /// agrees with, saying what was last read when giving up.
+        async fn wait_one_text(
+            &self,
+            by: &By,
+            what: impl std::fmt::Display,
+            matches: impl Fn(&str) -> bool,
+        ) -> Result<()> {
+            let seen = std::cell::RefCell::new(None::<String>);
+
+            let result = self
+                .wait_until(what, async || {
+                    let items = self.find_all(by.clone()).await?;
+
+                    ensure!(
+                        items.len() <= 1,
+                        "Expected exactly one by {by} to read, but got {}: where \
+                         several is what the page is, wait for all of their \
+                         texts with wait_texts",
+                        items.len()
+                    );
+
+                    let Some(item) = items.first() else {
+                        return Ok(false);
+                    };
+
+                    let text = item.text().await?;
+                    let matched = matches(&text);
+                    *seen.borrow_mut() = Some(text);
+                    Ok(matched)
+                })
+                .await;
+
+            result.map_err(|error| match seen.into_inner() {
+                Some(seen) if error.downcast_ref::<crate::finding::OutOfTime>().is_some() => {
+                    error.context(format!("last read {seen:?}"))
+                }
+                None if error.downcast_ref::<crate::finding::OutOfTime>().is_some() => {
+                    error.context("nothing matched to read")
+                }
+                _ => error,
+            })
         }
 
         /// Wait until exactly `expected` nodes match `by`.
@@ -267,7 +383,10 @@ macro_rules! common {
 
             tracing::trace!(?by, "Finding one element");
 
-            let found = crate::finding::poll(self.wait_timeout, async || {
+            crate::finding::poll(
+                self.wait_timeout,
+                || format!("Timed out after {:?} waiting for {by}", self.wait_timeout),
+                async || {
                 let items = self.find_all(by.clone()).await?;
 
                 ensure!(
@@ -280,15 +399,7 @@ macro_rules! common {
 
                 Ok(items.into_iter().next())
             })
-            .await?;
-
-            found.ok_or_else(|| {
-                crate::finding::OutOfTime(format!(
-                    "Timed out after {:?} waiting for {by}",
-                    self.wait_timeout
-                ))
-                .into()
-            })
+            .await
         }
 
         /// Find the `index`th element matching `by`, waiting for that many to
@@ -310,18 +421,12 @@ macro_rules! common {
 
             tracing::trace!(?by, index, "Finding one of several elements");
 
-            let found = crate::finding::poll(self.wait_timeout, async || {
-                Ok(self.find_all(by.clone()).await?.into_iter().nth(index))
-            })
-            .await?;
-
-            found.ok_or_else(|| {
-                crate::finding::OutOfTime(format!(
-                    "Timed out after {:?} waiting for {by} at {index}",
-                    self.wait_timeout
-                ))
-                .into()
-            })
+            crate::finding::poll(
+                self.wait_timeout,
+                || format!("Timed out after {:?} waiting for {by} at {index}", self.wait_timeout),
+                async || Ok(self.find_all(by.clone()).await?.into_iter().nth(index)),
+            )
+            .await
         }
 
         /// The first element matching `by`, however many there turn out to be.
@@ -425,9 +530,10 @@ impl IntoBy for By {
 #[cfg(test)]
 mod tests {
     use anyhow::{Result, anyhow, bail};
+    use thirtyfour::error::{WebDriverError, WebDriverErrorInfo, WebDriverErrorInner};
     use tokio::time::{self, Duration, Instant};
 
-    use super::{OutOfTime, bounded, poll};
+    use super::{OutOfTime, bounded, is_stale, poll};
 
     /// A lookup that takes `takes` to answer, bounded as `find_all_within`
     /// bounds one.
@@ -445,16 +551,34 @@ mod tests {
         assert_eq!(bounded(Duration::from_secs(5)), Duration::from_secs(5));
     }
 
+    /// What WebDriver answers a read of an element that has left the page.
+    fn stale() -> anyhow::Error {
+        WebDriverError::from(WebDriverErrorInner::StaleElementReference(
+            WebDriverErrorInfo::new(String::from("stale element reference")),
+        ))
+        .into()
+    }
+
+    /// The timeout every poll here is given.
+    fn waited() -> String {
+        String::from("the poll timed out")
+    }
+
     #[tokio::test(start_paused = true)]
     async fn a_slow_lookup_does_not_carry_a_wait_past_its_deadline() -> Result<()> {
         let start = Instant::now();
 
-        let found = poll(Duration::from_millis(300), async || {
+        let result = poll(Duration::from_millis(300), waited, async || {
             slow_find(Duration::from_secs(3)).await
         })
-        .await?;
+        .await;
 
-        assert!(found.is_none());
+        let Err(error) = result else {
+            bail!("a slow lookup answered");
+        };
+
+        assert!(error.downcast_ref::<OutOfTime>().is_some());
+        assert_eq!(error.to_string(), "the poll timed out");
         assert_eq!(start.elapsed(), Duration::from_millis(300));
         Ok(())
     }
@@ -463,22 +587,29 @@ mod tests {
     async fn a_poll_inside_a_wait_gives_up_with_it() -> Result<()> {
         let start = Instant::now();
 
-        let found = poll(Duration::from_millis(300), async || {
-            match poll(Duration::from_secs(5), async || Ok(None::<()>)).await? {
-                Some(()) => Ok(Some(())),
-                None => Err(OutOfTime(String::from("the inner poll")).into()),
-            }
+        let result = poll(Duration::from_millis(300), waited, async || {
+            poll(
+                Duration::from_secs(5),
+                || String::from("the inner poll"),
+                async || Ok(None::<()>),
+            )
+            .await
+            .map(Some)
         })
-        .await?;
+        .await;
 
-        assert!(found.is_none());
+        let Err(error) = result else {
+            bail!("a poll that never answers answered");
+        };
+
+        assert_eq!(error.to_string(), "the poll timed out");
         assert!(start.elapsed() < Duration::from_millis(400));
         Ok(())
     }
 
     #[tokio::test(start_paused = true)]
     async fn a_lookup_out_of_its_own_time_is_still_a_failure() -> Result<()> {
-        let result = poll(Duration::from_secs(60), async || {
+        let result = poll(Duration::from_secs(60), waited, async || {
             slow_find(Duration::from_secs(10)).await
         })
         .await;
@@ -495,7 +626,7 @@ mod tests {
     async fn an_attempt_that_fails_is_not_retried() -> Result<()> {
         let mut attempts = 0;
 
-        let result = poll(Duration::from_secs(1), async || {
+        let result = poll(Duration::from_secs(1), waited, async || {
             attempts += 1;
             Err::<Option<()>, _>(anyhow!("broken"))
         })
@@ -504,5 +635,53 @@ mod tests {
         assert!(result.is_err());
         assert_eq!(attempts, 1);
         Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stale_element_is_looked_for_again() -> Result<()> {
+        let mut attempts = 0;
+
+        let found = poll(Duration::from_secs(1), waited, async || {
+            attempts += 1;
+
+            if attempts < 3 {
+                return Err(stale().context("reading the row"));
+            }
+
+            Ok(Some(attempts))
+        })
+        .await?;
+
+        assert_eq!(found, 3);
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_poll_that_only_met_stale_elements_says_so_when_it_gives_up() -> Result<()> {
+        let result = poll(Duration::from_millis(300), waited, async || {
+            Err::<Option<()>, _>(stale().context("reading the row"))
+        })
+        .await;
+
+        let Err(error) = result else {
+            bail!("a poll that only met stale elements answered");
+        };
+
+        assert!(error.downcast_ref::<OutOfTime>().is_some());
+        let said = format!("{error:#}");
+        assert!(
+            said.starts_with("last attempt met a stale element: reading the row: "),
+            "{said}"
+        );
+        assert!(said.ends_with(": the poll timed out"), "{said}");
+        Ok(())
+    }
+
+    #[test]
+    fn only_a_stale_element_is_stale() {
+        assert!(is_stale(&stale()));
+        assert!(is_stale(&stale().context("reading the row")));
+        assert!(!is_stale(&anyhow!("stale element reference")));
+        assert!(!is_stale(&OutOfTime(String::from("late")).into()));
     }
 }

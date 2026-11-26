@@ -160,30 +160,32 @@ impl TestDriver {
     ) -> Result<()> {
         let mut refused = None;
 
-        let pressed = poll(self.wait_timeout, async || {
-            if let Some(item) = self.find_all(by.clone()).await?.get(index) {
-                match press(item).await {
-                    Ok(()) => return Ok(Some(())),
-                    Err(error) => refused = Some(error),
-                }
-            }
-
-            Ok(None)
-        })
-        .await?;
-
-        if pressed.is_some() {
-            return Ok(());
-        }
-
-        let timeout = OutOfTime(format!(
+        let timeout = format!(
             "Timed out after {:?} {doing} {by} at {index}",
             self.wait_timeout
-        ));
+        );
 
-        Err(match refused {
-            Some(error) => error.context(timeout),
-            None => timeout.into(),
-        })
+        let pressed = poll(
+            self.wait_timeout,
+            || timeout.clone(),
+            async || {
+                if let Some(item) = self.find_all(by.clone()).await?.get(index) {
+                    match press(item).await {
+                        Ok(()) => return Ok(Some(())),
+                        Err(error) => refused = Some(error),
+                    }
+                }
+
+                Ok(None)
+            },
+        )
+        .await;
+
+        match (pressed, refused) {
+            (Err(error), Some(refused)) if error.downcast_ref::<OutOfTime>().is_some() => {
+                Err(refused.context(OutOfTime(timeout)))
+            }
+            (pressed, _) => pressed,
+        }
     }
 }

@@ -1,5 +1,6 @@
-//! `text`, `attr`, `prop`, `value`, `css`, `rect`, `visible`, `pressed`,
-//! `enabled`, `disabled`, `element`, `find_all_attrs` and `bands`.
+//! `text`, `plain_text`, `attr`, `prop`, `value`, `css`, `rect`, `visible`,
+//! `pressed`, `checked`, `expanded`, `enabled`, `disabled`, `element`,
+//! `find_all_attrs` and `bands`.
 
 use yew_e2e::prelude::*;
 
@@ -18,6 +19,11 @@ pub const PAGE: Page = Page {
 <li data-id="a" style="height: 20px">A</li><li data-id="b" style="height: 30px">B</li><li data-id="c" style="display: none">C</li><li>none</li>
 </ul>
 <p data-test="text">plain <b>bold</b></p>
+<p data-test="fluent">Hello, &#x2068;Ada&#x2069;!</p>
+<div data-test="on" role="switch" aria-checked="true">On</div>
+<div data-test="mixed" role="checkbox" aria-checked="mixed">Mixed</div>
+<button data-test="open" aria-expanded="true">Open</button>
+<button data-test="shut" aria-expanded="false">Shut</button>
 "##,
     script: "",
 };
@@ -112,6 +118,68 @@ pub async fn pressed_reads_aria_pressed(driver: &mut TestDriver, pages: &mut Pag
             .await?
             .pressed()
             .await?
+    );
+    Ok(())
+}
+
+pub async fn checked_and_expanded_read_aria_state(
+    driver: &mut TestDriver,
+    pages: &mut Pages,
+) -> Result<()> {
+    pages.open(driver, &PAGE).await?;
+
+    let on = driver.find_one_by("[data-test=on]").await?;
+    let mixed = driver.find_one_by("[data-test=mixed]").await?;
+    let toggle = driver.find_one_by("[data-test=toggle]").await?;
+
+    ensure!(
+        on.checked().await?,
+        "aria-checked=true did not read as checked"
+    );
+    ensure!(
+        !mixed.checked().await?,
+        "aria-checked=mixed read as checked"
+    );
+    ensure!(
+        !toggle.checked().await?,
+        "a control with no aria-checked read as checked"
+    );
+
+    let open = driver.find_one_by("[data-test=open]").await?;
+    let shut = driver.find_one_by("[data-test=shut]").await?;
+
+    ensure!(
+        open.expanded().await?,
+        "aria-expanded=true did not read as expanded"
+    );
+    ensure!(
+        !shut.expanded().await?,
+        "aria-expanded=false read as expanded"
+    );
+    ensure!(
+        !toggle.expanded().await?,
+        "a control with no aria-expanded read as expanded"
+    );
+    Ok(())
+}
+
+pub async fn plain_text_drops_fluent_isolation_marks(
+    driver: &mut TestDriver,
+    pages: &mut Pages,
+) -> Result<()> {
+    pages.open(driver, &PAGE).await?;
+
+    let fluent = driver.find_one_by("[data-test=fluent]").await?;
+
+    ensure!(
+        fluent.text().await? == "Hello, \u{2068}Ada\u{2069}!",
+        "text() did not keep the marks: {:?}",
+        fluent.text().await?
+    );
+    ensure!(
+        fluent.plain_text().await? == "Hello, Ada!",
+        "plain_text() read {:?}",
+        fluent.plain_text().await?
     );
     Ok(())
 }

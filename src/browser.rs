@@ -398,10 +398,7 @@ async fn drive_one<F: Fixture>(
     };
 
     match outcome {
-        Ok(Ok(Ok(()))) => match driver.error_seen().await? {
-            Some(threw) => bail!("the page threw: {threw}"),
-            None => Ok(()),
-        },
+        Ok(Ok(Ok(()))) => driver.ensure_no_errors().await,
         Ok(Ok(result)) => result,
         Ok(Err(panicked)) => bail!("the test panicked: {}", panic_message(&panicked)),
         Err(error) => bail!(error),

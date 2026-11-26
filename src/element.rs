@@ -15,6 +15,13 @@ pub(crate) fn drag_nudge(offset: i64) -> i64 {
     offset.clamp(-8, 8)
 }
 
+/// `text` without Fluent's isolation marks; see [`TestElement::plain_text`].
+fn plain(text: &str) -> String {
+    text.chars()
+        .filter(|c| !matches!(c, '\u{2068}' | '\u{2069}'))
+        .collect()
+}
+
 /// A wrapped WebElement.
 pub struct TestElement {
     pub(crate) inner: WebElement,
@@ -246,6 +253,15 @@ impl TestElement {
         Ok(self.inner.text().await?)
     }
 
+    /// **The element's text without the isolation marks Fluent puts around
+    /// what it substitutes** (U+2068 FIRST STRONG ISOLATE and U+2069 POP
+    /// DIRECTIONAL ISOLATE), which a translated string carries invisibly and
+    /// which no expected text in a test is written with. [`Self::text`] reads
+    /// them as the page has them.
+    pub async fn plain_text(&self) -> Result<String> {
+        Ok(plain(&self.text().await?))
+    }
+
     /// One of the element's DOM properties.
     pub async fn prop(&self, name: &str) -> Result<String> {
         tracing::trace!(name, "Getting element property");
@@ -354,6 +370,18 @@ impl TestElement {
         Ok(self.prop("ariaPressed").await? == "true")
     }
 
+    /// Whether the element is checked, by `aria-checked`, as a switch or a
+    /// custom checkbox says it is. A `mixed` one is not.
+    pub async fn checked(&self) -> Result<bool> {
+        Ok(self.prop("ariaChecked").await? == "true")
+    }
+
+    /// Whether the element says what it controls is open, by
+    /// `aria-expanded`, as a disclosure or a menu button does.
+    pub async fn expanded(&self) -> Result<bool> {
+        Ok(self.prop("ariaExpanded").await? == "true")
+    }
+
     /// Whether the control can be worked at all.
     pub async fn enabled(&self) -> Result<bool> {
         Ok(self.inner.is_enabled().await?)
@@ -368,4 +396,15 @@ impl TestElement {
     }
 
     common!();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::plain;
+
+    #[test]
+    fn plain_drops_only_the_isolation_marks() {
+        assert_eq!(plain("Hello, \u{2068}Ada\u{2069}!"), "Hello, Ada!");
+        assert_eq!(plain("\u{2067}right\u{200f}"), "\u{2067}right\u{200f}");
+    }
 }
