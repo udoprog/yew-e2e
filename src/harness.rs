@@ -34,15 +34,25 @@ static ENGINE: OnceLock<Engine> = OnceLock::new();
 pub(crate) fn headed() -> bool {
     match HEADED.get() {
         Some(&headed) => headed,
-        None => headed_from(false, std::env::var_os("E2E_HEADED").as_deref()),
+        None => switch_from(false, std::env::var_os("E2E_HEADED").as_deref()),
     }
 }
 
-/// What `--headed` and `E2E_HEADED` between them say: the flag shows the
-/// browser, and so does any `E2E_HEADED` but `0` or `false`, so the variable
-/// still applies to a run that does not pass the flag.
-fn headed_from(flag: bool, env: Option<&std::ffi::OsStr>) -> bool {
+/// What a switch and its variable between them say, as `--headed` and
+/// `E2E_HEADED` do: the flag turns it on, and so does any value of the
+/// variable but `0` or `false`, so the variable still applies to a run that
+/// does not pass the flag.
+fn switch_from(flag: bool, env: Option<&std::ffi::OsStr>) -> bool {
     flag || env.is_some_and(|value| value != "0" && value != "false")
+}
+
+/// How long one test may run, in seconds, with zero for ever: `--timeout`
+/// where it is given, else what the suite's [`Config::timeout`] says, else
+/// [`DEFAULT_TIMEOUT`].
+///
+/// [`Config::timeout`]: crate::Config::timeout
+fn timeout_from(flag: Option<u16>, config: Option<u16>) -> u16 {
+    flag.or(config).unwrap_or(DEFAULT_TIMEOUT)
 }
 
 /// Which browser this run drives.
@@ -89,6 +99,24 @@ struct Test<F: Fixture> {
     name: String,
     start: Start<F>,
     setup: F::Setup,
+    /// Set for a test declared ignored, with the reason it was given if any.
+    ignored: Option<Ignored>,
+}
+
+/// Why a test is left out of a run unless `--include-ignored` asks for it.
+struct Ignored {
+    reason: Option<String>,
+}
+
+impl Ignored {
+    /// What a run says of it after the test's name: `ignored`, and the reason
+    /// where one was given, as libtest says it.
+    fn said(&self) -> String {
+        match &self.reason {
+            Some(reason) => format!("ignored, {reason}"),
+            None => String::from("ignored"),
+        }
+    }
 }
 
 impl<F: Fixture> Default for Suite<F> {
@@ -114,6 +142,29 @@ impl<F: Fixture> Suite<F> {
             name: name.into(),
             start,
             setup,
+            ignored: None,
+        });
+    }
+
+    /// Declare one test that is left out of a run unless `--include-ignored`
+    /// (or `E2E_INCLUDE_IGNORED`) asks for it, as `#[ignore]` does in
+    /// [`harness!`](crate::harness!). It is still listed and selected by
+    /// filters, and a run that leaves it out says so, with `reason` where one
+    /// is given.
+    pub fn add_ignored(
+        &mut self,
+        name: impl Into<String>,
+        start: Start<F>,
+        setup: F::Setup,
+        reason: Option<&str>,
+    ) {
+        self.tests.push(Test {
+            name: name.into(),
+            start,
+            setup,
+            ignored: Some(Ignored {
+                reason: reason.filter(|reason| !reason.is_empty()).map(String::from),
+            }),
         });
     }
 
@@ -125,7 +176,8 @@ impl<F: Fixture> Suite<F> {
             .long_about(format!(
                 "{}\n\n\
                  Also read: E2E_HEADED, which --headed overrides, E2E_BROWSER, which \
-                 --browser overrides, E2E_DIST to serve a frontend that is already built \
+                 --browser overrides, E2E_INCLUDE_IGNORED, which --include-ignored \
+                 overrides, E2E_DIST to serve a frontend that is already built \
                  rather than building one, E2E_THEME, E2E_MOTION and E2E_SCALE for what \
                  the browser reports, E2E_SHOTS for where snapshots go, and the usual \
                  RUST_LOG.",
@@ -224,8 +276,15 @@ impl<F: Fixture> Suite<F> {
         }
 
         if options.list {
+            // stdout keeps libtest's `name: test`, whatever is ignored, so a
+            // caller parsing it sees every test; what is ignored, and why, is
+            // commentary beside it.
             for test in &chosen {
                 println!("{}: test", test.name);
+
+                if let Some(ignored) = &test.ignored {
+                    _ = writeln!(prose, "{}: {}", test.name, ignored.said());
+                }
             }
 
             return Ok(true);
@@ -239,9 +298,33 @@ impl<F: Fixture> Suite<F> {
             return Ok(true);
         }
 
+        let include_ignored = switch_from(
+            options.include_ignored,
+            std::env::var_os("E2E_INCLUDE_IGNORED").as_deref(),
+        );
+
+        let (chosen, ignored) = split_ignored(chosen, include_ignored);
+
+        // Everything selected being ignored is a run that passes, as it is
+        // under libtest, and one that needs no browser.
+        if chosen.is_empty() {
+            for (name, ignored) in &ignored {
+                println!("test {name} ... {}", ignored.said());
+            }
+
+            println!(
+                "\ntest result: ok. 0 passed; 0 failed; {} ignored; 0 not run",
+                ignored.len()
+            );
+
+            return Ok(true);
+        }
+
+        let timeout = timeout_from(options.timeout, self.config.timeout);
+
         let engine = choose(options.browser)?;
 
-        _ = HEADED.set(headed_from(
+        _ = HEADED.set(switch_from(
             options.headed,
             std::env::var_os("E2E_HEADED").as_deref(),
         ));
@@ -259,14 +342,40 @@ impl<F: Fixture> Suite<F> {
 
         runtime.block_on(async move {
             crate::dist::build(&frontend).await?;
-            drive(chosen, &options).await
+            drive(chosen, ignored, &options, timeout).await
         })
     }
 }
 
+/// Split what was chosen into what runs and what is left out as ignored, in
+/// the order it was declared; `include` runs the ignored ones too.
+#[allow(clippy::type_complexity)]
+fn split_ignored<F: Fixture>(
+    chosen: Vec<Test<F>>,
+    include: bool,
+) -> (Vec<Test<F>>, Vec<(String, Ignored)>) {
+    let mut run = Vec::with_capacity(chosen.len());
+    let mut ignored = Vec::new();
+
+    for mut test in chosen {
+        match test.ignored.take() {
+            Some(why) if !include => ignored.push((test.name, why)),
+            _ => run.push(test),
+        }
+    }
+
+    (run, ignored)
+}
+
 /// Run `tests`, at most [`Options::parallel`] of them at once, reporting each as
-/// it finishes.
-async fn drive<F: Fixture>(tests: Vec<Test<F>>, options: &Options) -> Result<bool> {
+/// it finishes, and say of `ignored` that it was left out. `timeout` is the
+/// per-test cap in seconds, zero for none.
+async fn drive<F: Fixture>(
+    tests: Vec<Test<F>>,
+    ignored: Vec<(String, Ignored)>,
+    options: &Options,
+    timeout: u16,
+) -> Result<bool> {
     let started = Instant::now();
     let total = tests.len();
 
@@ -278,13 +387,19 @@ async fn drive<F: Fixture>(tests: Vec<Test<F>>, options: &Options) -> Result<boo
         session.name
     );
 
+    // Ignored tests are not part of the session: they were never meant to
+    // run, so `--last-session` has nothing to pick up of them.
+    for (name, ignored) in &ignored {
+        println!("test {name} ... {}", ignored.said());
+    }
+
     let queue = Rc::new(RefCell::new(VecDeque::from(tests)));
     let report = Rc::new(RefCell::new(Report::new(session)));
     let cancel = Rc::new(Cancel::default());
 
     let grace = Duration::from_secs(u64::from(options.grace));
 
-    let limit = match options.timeout {
+    let limit = match timeout {
         0 => None,
         seconds => Some(Duration::from_secs(u64::from(seconds))),
     };
@@ -372,9 +487,11 @@ async fn drive<F: Fixture>(tests: Vec<Test<F>>, options: &Options) -> Result<boo
     let (_, _, missed) = session.counts();
 
     println!(
-        "\ntest result: {}. {passed} passed; {} failed; {missed} not run; finished in {:.2}s",
+        "\ntest result: {}. {passed} passed; {} failed; {} ignored; {missed} not run; finished in \
+         {:.2}s",
         if ok { "ok" } else { "FAILED" },
         failures.len(),
+        ignored.len(),
         elapsed.as_secs_f64()
     );
 
@@ -628,7 +745,10 @@ async fn worker_with<F: Fixture, B: Seat, O: std::future::Future<Output = Result
     let mut used = 0usize;
 
     while !cancel.stopped() {
-        let Some(Test { name, start, setup }) = queue.borrow_mut().pop_front() else {
+        let Some(Test {
+            name, start, setup, ..
+        }) = queue.borrow_mut().pop_front()
+        else {
             break;
         };
 
@@ -761,6 +881,7 @@ mod lifecycle_tests {
                     name: name.to_owned(),
                     start: |_, _| Box::pin(async { panic!("a failed browser never runs a test") }),
                     setup: (),
+                    ignored: None,
                 })
                 .collect(),
         ))
@@ -1337,8 +1458,13 @@ struct Options {
     grace: u16,
 
     /// How long one test may run before it is failed. Zero waits for ever.
-    #[arg(long, value_name = "SECONDS", default_value_t = DEFAULT_TIMEOUT)]
-    timeout: u16,
+    /// Defaults to the suite's own, else 30.
+    #[arg(long, value_name = "SECONDS")]
+    timeout: Option<u16>,
+
+    /// Run the tests declared ignored as well as the rest.
+    #[arg(long)]
+    include_ignored: bool,
 
     /// How long to wait for another runner holding the same lock to finish.
     /// Zero waits for ever.
@@ -1416,6 +1542,87 @@ mod selection_tests {
             }
         }
     }
+
+    fn never<'a>(_: &'a mut crate::TestDriver, _: &'a mut Nothing) -> TestFuture<'a> {
+        Box::pin(async { panic!("an ignored test must not run") })
+    }
+
+    /// **An ignored test is listed and selected but left out of the run**,
+    /// unless `--include-ignored` asks for it; with nothing else selected the
+    /// run passes without a browser.
+    #[test]
+    fn ignored_tests_are_listed_and_left_out() {
+        let suite = || {
+            let mut suite = Suite::<Nothing>::new();
+            suite.add_ignored("module::quiet", never, (), None);
+            suite.add_ignored("module::told", never, (), Some("the reason"));
+            suite.add("module::runs", never, ());
+            suite
+        };
+
+        for args in [
+            vec!["e2e", "--list"],
+            vec!["e2e", "module::quiet", "module::told"],
+            vec!["e2e", "--allow-empty", "--include-ignored", "missing"],
+        ] {
+            assert!(
+                suite().try_run(Options::parse_from(&args)).unwrap(),
+                "{args:?}"
+            );
+        }
+
+        let (run, ignored) = split_ignored(suite().tests, false);
+        assert_eq!(
+            run.iter().map(|test| &test.name[..]).collect::<Vec<_>>(),
+            ["module::runs"]
+        );
+        assert_eq!(
+            ignored
+                .iter()
+                .map(|(name, ignored)| format!("{name} ... {}", ignored.said()))
+                .collect::<Vec<_>>(),
+            [
+                "module::quiet ... ignored",
+                "module::told ... ignored, the reason"
+            ]
+        );
+
+        let (run, ignored) = split_ignored(suite().tests, true);
+        assert_eq!(run.len(), 3);
+        assert!(ignored.is_empty());
+    }
+
+    /// The macro takes `#[ignore]` and `#[ignore = ".."]` before a test, with
+    /// or without a setup after it.
+    #[allow(dead_code)]
+    mod grammar {
+        use crate::harness::Nothing;
+
+        mod checks {
+            pub async fn first<F>(_: &mut crate::TestDriver, _: &mut F) -> anyhow::Result<()> {
+                Ok(())
+            }
+
+            pub async fn second<F>(_: &mut crate::TestDriver, _: &mut F) -> anyhow::Result<()> {
+                Ok(())
+            }
+
+            pub async fn third<F>(_: &mut crate::TestDriver, _: &mut F) -> anyhow::Result<()> {
+                Ok(())
+            }
+        }
+
+        crate::harness! {
+            Nothing;
+            checks::{
+                first,
+                #[ignore]
+                second(),
+                #[ignore = "a reason"]
+                third,
+            },
+        }
+    }
 }
 
 /// Declare the suite and the entrypoint that runs it.
@@ -1426,11 +1633,19 @@ mod selection_tests {
 /// needing something other than the bare fixture names it in parentheses, each
 /// word being a `bool` field of the fixture's `Setup` that is set for it.
 ///
+/// A test preceded by `#[ignore]`, or `#[ignore = "reason"]`, is left out of a
+/// run unless `--include-ignored` (or `E2E_INCLUDE_IGNORED`) asks for it; see
+/// [`Suite::add_ignored`].
+///
 /// ```ignore
 /// yew_e2e::harness! {
 ///     App;
 ///     cart::{adds_an_item, removes_an_item},
-///     login::{remembers_the_user(signed_in)},
+///     login::{
+///         remembers_the_user(signed_in),
+///         #[ignore = "the login server is down"]
+///         forgets_the_user(signed_in),
+///     },
 /// }
 /// ```
 #[macro_export]
@@ -1438,34 +1653,40 @@ macro_rules! harness {
     (
         $fixture:ty;
         $($module:ident :: {
-            $($test:ident $(($($setup:ident),* $(,)?))?),* $(,)?
+            $(
+                $(#[$ignore:ident $(= $reason:literal)?])?
+                $test:ident $(($($setup:ident),* $(,)?))?
+            ),* $(,)?
         }),* $(,)?
     ) => {
         fn main() -> ! {
             let mut suite = $crate::harness::Suite::<$fixture>::new();
 
             $(
-                $(
-                    suite.add(
-                        concat!(stringify!($module), "::", stringify!($test)),
-                        {
-                            fn start<'a>(
-                                driver: &'a mut $crate::TestDriver,
-                                fixture: &'a mut $fixture,
-                            ) -> $crate::harness::TestFuture<'a> {
-                                Box::pin($module::$test(driver, fixture))
-                            }
+                $({
+                    let name = concat!(stringify!($module), "::", stringify!($test));
 
-                            start
-                        },
-                        {
-                            #[allow(unused_mut)]
-                            let mut setup = <<$fixture as $crate::Fixture>::Setup as ::core::default::Default>::default();
-                            $($(setup.$setup = true;)*)?
-                            setup
-                        },
-                    );
-                )*
+                    fn start<'a>(
+                        driver: &'a mut $crate::TestDriver,
+                        fixture: &'a mut $fixture,
+                    ) -> $crate::harness::TestFuture<'a> {
+                        Box::pin($module::$test(driver, fixture))
+                    }
+
+                    #[allow(unused_mut)]
+                    let mut setup = <<$fixture as $crate::Fixture>::Setup as ::core::default::Default>::default();
+                    $($(setup.$setup = true;)*)?
+
+                    let ignored: ::core::option::Option<::core::option::Option<&str>> =
+                        $crate::__harness_ignore!($($ignore $(= $reason)?)?);
+
+                    match ignored {
+                        ::core::option::Option::None => suite.add(name, start, setup),
+                        ::core::option::Option::Some(reason) => {
+                            suite.add_ignored(name, start, setup, reason)
+                        }
+                    }
+                })*
             )*
 
             suite.run()
@@ -1473,24 +1694,57 @@ macro_rules! harness {
     };
 }
 
+/// Whether a test in [`harness!`](crate::harness!) is ignored, and the reason
+/// in its `#[ignore = "reason"]` if it has one; a compile error for any other
+/// attribute.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __harness_ignore {
+    () => {
+        ::core::option::Option::None
+    };
+    (ignore) => {
+        ::core::option::Option::Some(::core::option::Option::None)
+    };
+    (ignore = $reason:literal) => {
+        ::core::option::Option::Some(::core::option::Option::Some($reason))
+    };
+    ($other:ident $($rest:tt)*) => {
+        ::core::compile_error!(concat!(
+            "harness! takes only #[ignore] or #[ignore = \"reason\"] before a test, not #[",
+            stringify!($other),
+            "]"
+        ))
+    };
+}
+
 #[cfg(test)]
 mod tests {
     use std::ffi::OsStr;
 
-    use super::headed_from;
+    use super::{switch_from, timeout_from};
 
     /// **`E2E_HEADED` still applies when `--headed` is absent**, and the flag
     /// shows the browser whatever the variable says.
     #[test]
     fn the_headed_variable_applies_without_the_flag() {
-        assert!(!headed_from(false, None));
-        assert!(headed_from(true, None));
+        assert!(!switch_from(false, None));
+        assert!(switch_from(true, None));
         for on in ["1", "true", "yes"] {
-            assert!(headed_from(false, Some(OsStr::new(on))));
+            assert!(switch_from(false, Some(OsStr::new(on))));
         }
         for off in ["0", "false"] {
-            assert!(!headed_from(false, Some(OsStr::new(off))));
-            assert!(headed_from(true, Some(OsStr::new(off))));
+            assert!(!switch_from(false, Some(OsStr::new(off))));
+            assert!(switch_from(true, Some(OsStr::new(off))));
         }
+    }
+
+    /// **`--timeout` wins over the suite's own default**, which wins over 30.
+    #[test]
+    fn the_timeout_flag_overrides_the_suites_default() {
+        assert_eq!(timeout_from(None, None), 30);
+        assert_eq!(timeout_from(None, Some(90)), 90);
+        assert_eq!(timeout_from(Some(5), Some(90)), 5);
+        assert_eq!(timeout_from(Some(0), Some(90)), 0);
     }
 }

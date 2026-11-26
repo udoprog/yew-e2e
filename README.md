@@ -86,13 +86,18 @@ harness = false
 
 A test that needs something other than the bare fixture names it in
 parentheses after its name, each word setting a `bool` field of the fixture's
-`Setup`:
+`Setup`. One preceded by `#[ignore]`, or `#[ignore = "reason"]`, runs only
+under `--include-ignored`:
 
 ```rust
 yew_e2e::harness! {
     App;
     cart::{adds_an_item, removes_an_item},
     login::{remembers_the_user(signed_in)},
+    flaky::{
+        #[ignore = "waits on the upstream fix"]
+        races_the_server,
+    },
 }
 ```
 
@@ -141,8 +146,9 @@ cargo test -p app-e2e -- --last-session    # what did not pass last time
 | `--exact` | Filters match whole names rather than parts of them. |
 | `--list` | List the selected tests and run nothing. |
 | `--allow-empty` | A run that selects nothing passes rather than fails. |
+| `--include-ignored` | Run the tests declared `#[ignore]` as well as the rest. |
 | `--last-session`, `--session NAME` | Run only what did not pass in that session. |
-| `--timeout SECONDS` | How long one test may run. Defaults to 30; 0 waits for ever. |
+| `--timeout SECONDS` | How long one test may run. Defaults to [`Config::timeout`], else 30; 0 waits for ever. |
 | `--grace SECONDS` | How long a running test is given to finish after Ctrl-C or SIGTERM. |
 | `--lock target\|project\|none` | Which other runs this one waits for: those in the same build directory (the default), every worktree of the Git project, or none. |
 | `--lock-wait SECONDS` | How long to wait for that lock. |
@@ -151,6 +157,7 @@ cargo test -p app-e2e -- --last-session    # what did not pass last time
 |---|---|
 | `E2E_HEADED` | As `--headed`. |
 | `E2E_BROWSER` | As `--browser`. |
+| `E2E_INCLUDE_IGNORED` | As `--include-ignored`. |
 | `E2E_DIST` | A frontend that is already built, served in place of building one. |
 | `E2E_THEME` | `dark` or `light`, for the colour scheme the browser reports (Firefox). |
 | `E2E_MOTION` | `reduce` or `normal`, for the motion preference the browser reports (Firefox). |
@@ -159,6 +166,7 @@ cargo test -p app-e2e -- --last-session    # what did not pass last time
 
 [`Config::lock_name`]: https://docs.rs/yew-e2e/latest/yew_e2e/struct.Config.html#method.lock_name
 [`Config::sessions_dir`]: https://docs.rs/yew-e2e/latest/yew_e2e/struct.Config.html#method.sessions_dir
+[`Config::timeout`]: https://docs.rs/yew-e2e/latest/yew_e2e/struct.Config.html#method.timeout
 [`dist()`]: https://docs.rs/yew-e2e/latest/yew_e2e/fn.dist.html
 [`examples/static_page.rs`]: https://github.com/udoprog/yew-e2e/blob/main/examples/static_page.rs
 [`Fixture`]: https://docs.rs/yew-e2e/latest/yew_e2e/trait.Fixture.html
