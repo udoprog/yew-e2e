@@ -33,6 +33,7 @@ mod navigation;
 mod pointer;
 mod scripts;
 mod scroll;
+mod sockets;
 mod storage;
 mod style;
 mod waits;
@@ -64,6 +65,7 @@ const PAGES: &[&Page] = &[
     &scripts::PAGE,
     &scripts::COLLIDE,
     &scroll::PAGE,
+    &sockets::PAGE,
     &storage::PAGE,
     &style::PAGE,
     &waits::PAGE,
@@ -200,6 +202,12 @@ impl Fixture for Pages {
 
                     let request = String::from_utf8_lossy(&request[..n]);
                     let path = request.split(' ').nth(1).unwrap_or("/");
+
+                    if path == "/socket" {
+                        sockets::echo(stream, &request).await;
+                        return;
+                    }
+
                     let (status, kind, headers, body) = respond(path);
 
                     let response = format!(
@@ -427,6 +435,11 @@ mod suite {
             capture_clipboard_and_wait_copied,
             delay_websocket_sends_patches_and_restores_send,
             watch_mutations_counts_changes,
+        },
+        sockets::{
+            hold_websocket_sends_holds_and_releases_in_order,
+            hold_fetches_holds_and_releases_in_order,
+            disconnect_websockets_closes_and_refuses_until_reconnect,
         },
         style::{
             set_style_and_set_class_force_styles,

@@ -21,6 +21,7 @@ mod navigation;
 mod pointer;
 mod scripts;
 mod scroll;
+mod sockets;
 mod storage;
 mod style;
 mod wheel;
