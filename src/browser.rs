@@ -184,12 +184,13 @@ impl Browser {
         Ok(())
     }
 
-    /// Put the browser on a fresh tab, then go to `url`.
+    /// Put the browser on a fresh tab, let `fixture` prepare it, then go to
+    /// the fixture's page.
     ///
     /// The preceding document is closed rather than navigated away from. A
     /// WebDriver navigation leaves session history behind; long runs showed
     /// memory growth that closing the previous tab removed.
-    async fn reset(&mut self, url: &str) -> Result<()> {
+    async fn reset<F: Fixture>(&mut self, fixture: &mut F) -> Result<()> {
         self.clear_state()?;
         phase(Phase::TabReset, async {
             let old = self.driver.inner.window().await?;
@@ -201,7 +202,9 @@ impl Browser {
             self.driver.set_window_size(WINDOW.0, WINDOW.1).await
         })
         .await?;
-        phase(Phase::Goto, self.driver.inner.goto(url)).await?;
+        phase(Phase::FixturePrepare, fixture.prepare(&mut self.driver)).await?;
+        let url = fixture.url();
+        phase(Phase::Goto, self.driver.inner.goto(&url)).await?;
         Ok(())
     }
 
@@ -399,7 +402,7 @@ pub(crate) async fn run_one<F: Fixture>(
     let prepared = if recycled {
         browser.reset_recycled().await
     } else {
-        browser.reset(&fixture.url()).await
+        browser.reset(&mut fixture).await
     };
 
     let result = match prepared {
@@ -568,13 +571,31 @@ mod browser_tests {
     #[tokio::test]
     #[ignore = "requires a real WebDriver"]
     async fn a_reset_discards_the_preceding_document() -> Result<()> {
+        struct Page(&'static str);
+
+        impl crate::Fixture for Page {
+            type Setup = ();
+
+            async fn start((): ()) -> Result<Self> {
+                anyhow::bail!("not started by the runner")
+            }
+
+            fn url(&self) -> String {
+                self.0.to_owned()
+            }
+
+            async fn quit(self) -> Result<()> {
+                Ok(())
+            }
+        }
+
         let mut browser = Browser::open().await?;
 
         let result = async {
-            browser.reset("data:text/html,first").await?;
+            browser.reset(&mut Page("data:text/html,first")).await?;
             let first = browser.driver.inner.window().await?;
 
-            browser.reset("data:text/html,second").await?;
+            browser.reset(&mut Page("data:text/html,second")).await?;
             let second = browser.driver.inner.window().await?;
             let windows = browser.driver.inner.windows().await?;
             let history = browser
@@ -589,6 +610,213 @@ mod browser_tests {
             ensure!(first != second, "the second reset kept the first tab");
             ensure!(windows == [second], "reset left tabs behind: {windows:?}");
             ensure!(history <= 2, "the fresh tab has {history} history entries");
+            Ok(())
+        }
+        .await;
+
+        match (result, browser.close().await) {
+            (Ok(()), Ok(_)) => Ok(()),
+            (Err(error), Ok(_)) | (Ok(()), Err(error)) => Err(error),
+            (Err(error), Err(cleanup)) => Err(super::driver::with_cleanup(error, Err(cleanup))),
+        }
+    }
+
+    /// `Fixture::prepare` runs on the fresh tab before the first navigation,
+    /// so a cookie it sets is sent with the fixture's first page load; a
+    /// recycled fixture is not prepared again.
+    #[tokio::test]
+    #[ignore = "requires a real WebDriver"]
+    async fn a_prepared_cookie_reaches_the_first_page_load() -> Result<()> {
+        use std::cell::{Cell, RefCell};
+        use std::rc::Rc;
+
+        use thirtyfour::Cookie;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+        use tokio::task::JoinHandle;
+
+        use crate::timings::{Phase, Timings, within};
+        use crate::{Fixture, TestDriver};
+
+        #[derive(Clone, Default)]
+        struct CookieSetup {
+            prepares: Rc<Cell<usize>>,
+        }
+
+        struct CookieFixture {
+            port: u16,
+            prepares: Rc<Cell<usize>>,
+            server: JoinHandle<()>,
+        }
+
+        impl Fixture for CookieFixture {
+            type Setup = CookieSetup;
+
+            /// Serves every path a page naming the `Cookie` header its request
+            /// came with.
+            async fn start(setup: Self::Setup) -> Result<Self> {
+                let listener = TcpListener::bind("127.0.0.1:0").await?;
+                let port = listener.local_addr()?.port();
+
+                let server = tokio::spawn(async move {
+                    while let Ok((mut stream, _)) = listener.accept().await {
+                        let mut request = [0; 8192];
+                        let Ok(n) = stream.read(&mut request).await else {
+                            continue;
+                        };
+                        let request = String::from_utf8_lossy(&request[..n]);
+                        let cookie = request
+                            .lines()
+                            .find_map(|line| {
+                                let (name, value) = line.split_once(':')?;
+                                name.eq_ignore_ascii_case("cookie").then(|| value.trim())
+                            })
+                            .unwrap_or("");
+                        let body = format!("<p id='cookie'>{cookie}</p>");
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\ncontent-type: text/html\r\n\
+                             content-length: {}\r\ncache-control: no-store\r\n\
+                             connection: close\r\n\r\n{body}",
+                            body.len()
+                        );
+                        let _ = stream.write_all(response.as_bytes()).await;
+                    }
+                });
+
+                Ok(Self {
+                    port,
+                    prepares: setup.prepares,
+                    server,
+                })
+            }
+
+            fn url(&self) -> String {
+                format!("http://127.0.0.1:{}/page", self.port)
+            }
+
+            async fn prepare(&mut self, driver: &mut TestDriver) -> Result<()> {
+                self.prepares.set(self.prepares.get() + 1);
+                driver
+                    .webdriver()
+                    .goto(format!("http://127.0.0.1:{}/blank", self.port))
+                    .await?;
+                driver
+                    .webdriver()
+                    .add_cookie(Cookie::new("session", "prepared"))
+                    .await?;
+                Ok(())
+            }
+
+            async fn recycle(
+                &mut self,
+                _driver: &mut TestDriver,
+                _next: &Self::Setup,
+            ) -> Result<bool> {
+                Ok(true)
+            }
+
+            async fn quit(self) -> Result<()> {
+                self.server.abort();
+                Ok(())
+            }
+        }
+
+        async fn sent_cookie(driver: &TestDriver) -> Result<String> {
+            driver
+                .inner
+                .execute(
+                    "return document.getElementById('cookie').textContent;",
+                    Vec::new(),
+                )
+                .await?
+                .json()
+                .as_str()
+                .map(str::to_owned)
+                .context("the page's cookie text")
+        }
+
+        let mut browser = Browser::open().await?;
+        let prepares = Rc::new(Cell::new(0));
+
+        let result = async {
+            let setup = || CookieSetup {
+                prepares: prepares.clone(),
+            };
+
+            // 1. Fresh start: the first load of the fixture's page carries the cookie.
+            let timings = Rc::new(RefCell::new(Timings::default()));
+            let first = within(
+                Some(&timings),
+                super::run_one::<CookieFixture>(
+                    &mut browser,
+                    None,
+                    |driver, _| {
+                        Box::pin(async move {
+                            let cookie = sent_cookie(driver).await?;
+                            ensure!(
+                                cookie == "session=prepared",
+                                "the first load sent {cookie:?}"
+                            );
+                            Ok(())
+                        })
+                    },
+                    setup(),
+                    None,
+                ),
+            )
+            .await;
+            first.result?;
+            let kept = first.fixture.context("passing test should keep fixture")?;
+            ensure!(prepares.get() == 1, "prepared {} times", prepares.get());
+
+            let phases = timings
+                .borrow()
+                .phases
+                .iter()
+                .map(|(phase, _)| *phase)
+                .collect::<Vec<_>>();
+            ensure!(
+                phases
+                    == [
+                        Phase::FixtureStart,
+                        Phase::TabReset,
+                        Phase::FixturePrepare,
+                        Phase::Goto,
+                        Phase::Body
+                    ],
+                "unexpected fresh phases: {phases:?}"
+            );
+
+            // 2. Recycled: the page is kept and the fixture is not prepared again.
+            let timings = Rc::new(RefCell::new(Timings::default()));
+            let second = within(
+                Some(&timings),
+                super::run_one::<CookieFixture>(
+                    &mut browser,
+                    Some(kept),
+                    |_, _| Box::pin(async { Ok(()) }),
+                    setup(),
+                    None,
+                ),
+            )
+            .await;
+            second.result?;
+            ensure!(prepares.get() == 1, "a recycled fixture was prepared");
+            let phases = timings
+                .borrow()
+                .phases
+                .iter()
+                .map(|(phase, _)| *phase)
+                .collect::<Vec<_>>();
+            ensure!(
+                phases == [Phase::FixtureRecycle, Phase::TabReset, Phase::Body],
+                "unexpected recycled phases: {phases:?}"
+            );
+
+            if let Some(fixture) = second.fixture {
+                fixture.quit().await?;
+            }
+
             Ok(())
         }
         .await;

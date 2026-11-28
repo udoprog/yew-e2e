@@ -146,7 +146,7 @@
 //! | `--include-ignored` | Run the tests declared `#[ignore]` as well as the rest. |
 //! | `--last-session`, `--session NAME` | Run only what did not pass in that session. |
 //! | `--timeout SECONDS` | How long one test may run. Defaults to [`Config::timeout`], else 30; 0 waits for ever. |
-//! | `--timings` | Under each test, how long each phase took (browser open, fixture start, recycle and quit, tab reset, navigation, the test itself) and its slowest waits. |
+//! | `--timings` | Under each test, how long each phase took (browser open, fixture start, recycle and quit, tab reset, [`Fixture::prepare`], navigation, the test itself) and its slowest waits. |
 //! | `--grace SECONDS` | How long a running test is given to finish after Ctrl-C or SIGTERM. |
 //! | `--lock target\|project\|none` | Which other runs this one waits for: those in the same build directory (the default), every worktree of the Git project, or none. |
 //! | `--lock-wait SECONDS` | How long to wait for that lock. |
@@ -260,6 +260,24 @@ pub trait Fixture: Sized + 'static {
     /// Where the browser is pointed for this test.
     fn url(&self) -> String;
 
+    /// Prepare the browser before its first navigation to [`Fixture::url`].
+    ///
+    /// Called after [`Fixture::start`], once the test has a fresh, empty tab
+    /// and before the runner goes to the fixture's page, so a fixture can set
+    /// what that first load should see: cookies, for one. The default does
+    /// nothing.
+    ///
+    /// WebDriver only adds a cookie for the domain of the current document, so
+    /// a fixture setting cookies first navigates to a cheap page on the same
+    /// origin, both through [`TestDriver::webdriver`]. Cookies ignore the
+    /// port, so one set on `localhost` reaches a server on any port there.
+    ///
+    /// Not called on a fixture [recycled](Fixture::recycle): its page is kept
+    /// and nothing is navigated.
+    fn prepare(&mut self, _driver: &mut TestDriver) -> impl Future<Output = Result<()>> {
+        async { Ok(()) }
+    }
+
     /// Reuse this fixture and the page already loaded in `driver` for the next
     /// test, configured with `next`.
     ///
@@ -267,7 +285,8 @@ pub trait Fixture: Sized + 'static {
     /// browser for another test. Returning `Ok(true)` keeps the current tab and
     /// skips [`Fixture::start`] and navigation while still clearing per-test
     /// runner state; returning `Ok(false)` (the default) or an error quits this
-    /// fixture and starts a fresh one on a new tab.
+    /// fixture and starts a fresh one on a new tab. A recycled fixture is not
+    /// [prepared](Fixture::prepare): set what the next test needs here.
     fn recycle(
         &mut self,
         _driver: &mut TestDriver,

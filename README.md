@@ -149,7 +149,7 @@ cargo test -p app-e2e -- --last-session    # what did not pass last time
 | `--include-ignored` | Run the tests declared `#[ignore]` as well as the rest. |
 | `--last-session`, `--session NAME` | Run only what did not pass in that session. |
 | `--timeout SECONDS` | How long one test may run. Defaults to [`Config::timeout`], else 30; 0 waits for ever. |
-| `--timings` | Under each test, how long each phase took (browser open, fixture start, recycle and quit, tab reset, navigation, the test itself) and its slowest waits. |
+| `--timings` | Under each test, how long each phase took (browser open, fixture start, recycle and quit, tab reset, [`Fixture::prepare`], navigation, the test itself) and its slowest waits. |
 | `--grace SECONDS` | How long a running test is given to finish after Ctrl-C or SIGTERM. |
 | `--lock target\|project\|none` | Which other runs this one waits for: those in the same build directory (the default), every worktree of the Git project, or none. |
 | `--lock-wait SECONDS` | How long to wait for that lock. |
@@ -172,6 +172,7 @@ cargo test -p app-e2e -- --last-session    # what did not pass last time
 [`dist()`]: https://docs.rs/yew-e2e/latest/yew_e2e/fn.dist.html
 [`examples/static_page.rs`]: https://github.com/udoprog/yew-e2e/blob/main/examples/static_page.rs
 [`Fixture`]: https://docs.rs/yew-e2e/latest/yew_e2e/trait.Fixture.html
+[`Fixture::prepare`]: https://docs.rs/yew-e2e/latest/yew_e2e/trait.Fixture.html#method.prepare
 [`Frontend::None`]: https://docs.rs/yew-e2e/latest/yew_e2e/enum.Frontend.html#variant.None
 [`Frontend::Trunk(dir)`]: https://docs.rs/yew-e2e/latest/yew_e2e/enum.Frontend.html#variant.Trunk
 [`Frontend::Trug(dir)`]: https://docs.rs/yew-e2e/latest/yew_e2e/enum.Frontend.html#variant.Trug

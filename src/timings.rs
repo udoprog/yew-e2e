@@ -36,6 +36,8 @@ pub(crate) enum Phase {
     FixtureRecycle,
     /// Swapping in a fresh tab and sizing the window.
     TabReset,
+    /// [`Fixture::prepare`](crate::Fixture::prepare).
+    FixturePrepare,
     /// Navigating to the fixture's page.
     Goto,
     /// The test itself.
@@ -52,6 +54,7 @@ impl Phase {
             Phase::FixtureStart => "fixture start",
             Phase::FixtureRecycle => "recycle",
             Phase::TabReset => "reset",
+            Phase::FixturePrepare => "prepare",
             Phase::Goto => "goto",
             Phase::Body => "body",
             Phase::FixtureQuit => "fixture quit",
@@ -223,6 +226,7 @@ mod tests {
                 (Phase::SessionCreate, ms(1020)),
                 (Phase::FixtureStart, ms(20)),
                 (Phase::TabReset, ms(330)),
+                (Phase::FixturePrepare, ms(4)),
                 (Phase::Goto, ms(25)),
                 (Phase::Body, ms(2104)),
                 (Phase::FixtureQuit, ms(0)),
@@ -233,7 +237,7 @@ mod tests {
         assert_eq!(
             render(&timings),
             "    timings: driver 8ms, session 1.02s, fixture start 20ms, reset 330ms, \
-             goto 25ms, body 2.10s, fixture quit 0ms\n"
+             prepare 4ms, goto 25ms, body 2.10s, fixture quit 0ms\n"
         );
     }
 
