@@ -32,6 +32,8 @@ pub(crate) enum Phase {
     SessionCreate,
     /// [`Fixture::start`](crate::Fixture::start).
     FixtureStart,
+    /// [`Fixture::recycle`](crate::Fixture::recycle).
+    FixtureRecycle,
     /// Swapping in a fresh tab and sizing the window.
     TabReset,
     /// Navigating to the fixture's page.
@@ -48,6 +50,7 @@ impl Phase {
             Phase::DriverSpawn => "driver",
             Phase::SessionCreate => "session",
             Phase::FixtureStart => "fixture start",
+            Phase::FixtureRecycle => "recycle",
             Phase::TabReset => "reset",
             Phase::Goto => "goto",
             Phase::Body => "body",
@@ -231,6 +234,23 @@ mod tests {
             render(&timings),
             "    timings: driver 8ms, session 1.02s, fixture start 20ms, reset 330ms, \
              goto 25ms, body 2.10s, fixture quit 0ms\n"
+        );
+    }
+
+    #[test]
+    fn a_recycled_test_names_the_recycle_phase() {
+        let timings = Timings {
+            phases: vec![
+                (Phase::FixtureRecycle, ms(14)),
+                (Phase::TabReset, ms(3)),
+                (Phase::Body, ms(180)),
+            ],
+            waits: Vec::new(),
+        };
+
+        assert_eq!(
+            render(&timings),
+            "    timings: recycle 14ms, reset 3ms, body 180ms\n"
         );
     }
 

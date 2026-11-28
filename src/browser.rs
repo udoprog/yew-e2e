@@ -170,12 +170,8 @@ impl Browser {
         })
     }
 
-    /// Put the browser on a fresh tab, then go to `url`.
-    ///
-    /// The preceding document is closed rather than navigated away from. A
-    /// WebDriver navigation leaves session history behind; long runs showed
-    /// memory growth that closing the previous tab removed.
-    async fn reset(&mut self, url: &str) -> Result<()> {
+    /// Clear per-test runner state held on the driver and its download directory.
+    fn clear_state(&self) -> Result<()> {
         self.driver.waiting.clear();
         self.driver.watching.store(false, Ordering::Relaxed);
         // A drag the last test left held is not this test's to let go of where
@@ -185,6 +181,16 @@ impl Browser {
         for file in std::fs::read_dir(self.driver.downloads.path())? {
             std::fs::remove_file(file?.path())?;
         }
+        Ok(())
+    }
+
+    /// Put the browser on a fresh tab, then go to `url`.
+    ///
+    /// The preceding document is closed rather than navigated away from. A
+    /// WebDriver navigation leaves session history behind; long runs showed
+    /// memory growth that closing the previous tab removed.
+    async fn reset(&mut self, url: &str) -> Result<()> {
+        self.clear_state()?;
         phase(Phase::TabReset, async {
             let old = self.driver.inner.window().await?;
             let fresh = self.driver.inner.new_tab().await?;
@@ -197,6 +203,17 @@ impl Browser {
         .await?;
         phase(Phase::Goto, self.driver.inner.goto(url)).await?;
         Ok(())
+    }
+
+    /// Clear per-test runner state on a browser whose fixture was recycled,
+    /// keeping the current tab and document.
+    async fn reset_recycled(&mut self) -> Result<()> {
+        self.clear_state()?;
+        phase(Phase::TabReset, async {
+            self.driver.inner.enter_default_frame().await?;
+            self.driver.set_window_size(WINDOW.0, WINDOW.1).await
+        })
+        .await
     }
 
     /// Take the browser and its driver down.
@@ -303,47 +320,129 @@ fn driver_said(browser: &Browser) -> String {
         .join(" | ")
 }
 
-/// Start the fixture for one test, run it, and take the fixture down again.
+/// What [`run_one`] hands back to its worker: the test's result, the fixture
+/// kept for the next test when it passed, and any non-fatal warnings raised
+/// while recycling or quitting the preceding fixture.
+pub(crate) struct RunOutcome<F> {
+    pub(crate) result: Result<()>,
+    pub(crate) fixture: Option<F>,
+    pub(crate) warnings: Vec<anyhow::Error>,
+}
+
+/// Start (or recycle) the fixture for one test, run it, and either keep the
+/// fixture on pass or take it down on failure.
 pub(crate) async fn run_one<F: Fixture>(
     browser: &mut Browser,
+    kept: Option<F>,
     start: crate::harness::Start<F>,
     setup: F::Setup,
     limit: Option<Duration>,
-) -> Result<()> {
-    let mut fixture = phase(Phase::FixtureStart, F::start(setup)).await?;
+) -> RunOutcome<F> {
+    let mut warnings = Vec::new();
+    let mut recycled_fixture = None;
 
-    let mut errors = String::new();
+    if let Some(mut prev) = kept {
+        browser.driver.waiting.clear();
+        match phase(
+            Phase::FixtureRecycle,
+            prev.recycle(&mut browser.driver, &setup),
+        )
+        .await
+        {
+            Ok(true) => {
+                recycled_fixture = Some(prev);
+            }
+            Ok(false) => {
+                if let Err(error) = phase(Phase::FixtureQuit, prev.quit()).await {
+                    warnings.push(error.context("quitting the previous fixture"));
+                }
+            }
+            Err(error) => {
+                if let Some(mark) = browser_death(&error) {
+                    let fixture_result = phase(Phase::FixtureQuit, prev.quit()).await;
+                    let mut error = went_away(browser, mark);
 
-    let result = match browser.reset(&fixture.url()).await {
+                    if let Err(quit) = fixture_result {
+                        error = error.context(format!("the fixture also failed to quit: {quit}"));
+                    }
+
+                    return RunOutcome {
+                        result: Err(error),
+                        fixture: None,
+                        warnings,
+                    };
+                }
+
+                warnings.push(error.context("recycling the previous fixture"));
+
+                if let Err(error) = phase(Phase::FixtureQuit, prev.quit()).await {
+                    warnings.push(error.context("quitting the previous fixture"));
+                }
+            }
+        }
+    }
+
+    let (mut fixture, recycled) = match recycled_fixture {
+        Some(fixture) => (fixture, true),
+        None => match phase(Phase::FixtureStart, F::start(setup)).await {
+            Ok(fixture) => (fixture, false),
+            Err(error) => {
+                return RunOutcome {
+                    result: Err(error),
+                    fixture: None,
+                    warnings,
+                };
+            }
+        },
+    };
+
+    let prepared = if recycled {
+        browser.reset_recycled().await
+    } else {
+        browser.reset(&fixture.url()).await
+    };
+
+    let result = match prepared {
         Ok(()) => phase(Phase::Body, drive_one(browser, &mut fixture, start, limit)).await,
         Err(error) => Err(error),
     };
 
+    let Err(error) = result else {
+        return RunOutcome {
+            result: Ok(()),
+            fixture: Some(fixture),
+            warnings,
+        };
+    };
+
     let fixture_result = phase(Phase::FixtureQuit, fixture.quit()).await;
 
-    if let Err(error) = result.as_ref() {
-        if let Some(mark) = browser_death(error) {
-            let mut error = went_away(browser, mark);
+    if let Some(mark) = browser_death(&error) {
+        let mut error = went_away(browser, mark);
 
-            if let Err(quit) = fixture_result {
-                error = error.context(format!("the fixture also failed to quit: {quit}"));
-            }
-
-            return Err(error);
+        if let Err(quit) = fixture_result {
+            error = error.context(format!("the fixture also failed to quit: {quit}"));
         }
 
-        write_chain(&mut errors, "Test error", error)?;
+        return RunOutcome {
+            result: Err(error),
+            fixture: None,
+            warnings,
+        };
     }
 
-    if let Err(error) = fixture_result {
-        write_chain(&mut errors, "Fixture error", &error)?;
+    let mut errors = String::new();
+    let _ = write_chain(&mut errors, "Test error", &error);
+
+    if let Err(quit_error) = fixture_result {
+        let _ = write_chain(&mut errors, "Fixture error", &quit_error);
     }
 
-    if !errors.is_empty() {
-        return Err(anyhow!("{errors}"));
+    RunOutcome {
+        result: Err(anyhow!("{errors}")),
+        fixture: None,
+        warnings,
     }
-
-    Ok(())
 }
 
 /// One failure of a test's report: `label` and what the error says, then every
@@ -490,6 +589,251 @@ mod browser_tests {
             ensure!(first != second, "the second reset kept the first tab");
             ensure!(windows == [second], "reset left tabs behind: {windows:?}");
             ensure!(history <= 2, "the fresh tab has {history} history entries");
+            Ok(())
+        }
+        .await;
+
+        match (result, browser.close().await) {
+            (Ok(()), Ok(_)) => Ok(()),
+            (Err(error), Ok(_)) | (Ok(()), Err(error)) => Err(error),
+            (Err(error), Err(cleanup)) => Err(super::driver::with_cleanup(error, Err(cleanup))),
+        }
+    }
+
+    /// A recycled fixture keeps the same tab and document across tests while
+    /// still clearing per-test runner state, falling back to a fresh fixture on
+    /// `Ok(false)` or `Err`, and quitting immediately on test failure.
+    #[tokio::test]
+    #[ignore = "requires a real WebDriver"]
+    async fn a_recycled_fixture_keeps_its_page_and_clears_per_test_state() -> Result<()> {
+        use std::cell::{Cell, RefCell};
+        use std::rc::Rc;
+        use std::sync::atomic::Ordering;
+
+        use crate::timings::{Phase, Timings, within};
+        use crate::{Fixture, TestDriver, WINDOW};
+
+        #[derive(Clone, Copy, Default)]
+        enum Mode {
+            #[default]
+            Keep,
+            Decline,
+            Fail,
+        }
+
+        #[derive(Clone, Default)]
+        struct RecycleSetup {
+            mode: Mode,
+            starts: Rc<Cell<usize>>,
+            quits: Rc<Cell<usize>>,
+        }
+
+        struct RecycleFixture {
+            quits: Rc<Cell<usize>>,
+        }
+
+        impl Fixture for RecycleFixture {
+            type Setup = RecycleSetup;
+
+            async fn start(setup: Self::Setup) -> Result<Self> {
+                setup.starts.set(setup.starts.get() + 1);
+                Ok(Self { quits: setup.quits })
+            }
+
+            fn url(&self) -> String {
+                "data:text/html,<iframe id='child' srcdoc='<p>inside</p>'></iframe>".to_owned()
+            }
+
+            async fn recycle(
+                &mut self,
+                _driver: &mut TestDriver,
+                next: &Self::Setup,
+            ) -> Result<bool> {
+                match next.mode {
+                    Mode::Keep => Ok(true),
+                    Mode::Decline => Ok(false),
+                    Mode::Fail => anyhow::bail!("recycle-failed-marker"),
+                }
+            }
+
+            async fn quit(self) -> Result<()> {
+                self.quits.set(self.quits.get() + 1);
+                Ok(())
+            }
+        }
+
+        let mut browser = Browser::open().await?;
+        let starts = Rc::new(Cell::new(0));
+        let quits = Rc::new(Cell::new(0));
+
+        let result = async {
+            let setup = |mode| RecycleSetup {
+                mode,
+                starts: starts.clone(),
+                quits: quits.clone(),
+            };
+
+            // 1. Fresh start: dirty every piece of per-test state and enter an iframe.
+            let first = super::run_one::<RecycleFixture>(
+                &mut browser,
+                None,
+                |driver, _| {
+                    Box::pin(async move {
+                        driver
+                            .inner
+                            .execute("window.__recycled_marker = 'kept';", Vec::new())
+                            .await?;
+                        driver.set_window_size(900, 700).await?;
+                        std::fs::write(driver.downloads().join("leftover.txt"), b"old")?;
+                        driver.watch_for_errors().await?;
+                        driver.holding.set(true);
+                        driver.waiting.on("stale-wait");
+                        let frame = driver.find_one_by("#child").await?;
+                        frame.inner.enter_frame().await?;
+                        Ok(())
+                    })
+                },
+                setup(Mode::Keep),
+                None,
+            )
+            .await;
+            first.result?;
+            ensure!(first.warnings.is_empty(), "unexpected warnings");
+            let kept = first.fixture.context("passing test should keep fixture")?;
+            let first_window = browser.driver.inner.window().await?;
+            ensure!(starts.get() == 1 && quits.get() == 0);
+
+            // 2. Recycled: same tab & document, but all per-test state cleared.
+            let timings = Rc::new(RefCell::new(Timings::default()));
+            let second = within(
+                Some(&timings),
+                super::run_one::<RecycleFixture>(
+                    &mut browser,
+                    Some(kept),
+                    |driver, _| {
+                        Box::pin(async move {
+                            let is_top = driver
+                                .inner
+                                .execute("return window === window.top;", Vec::new())
+                                .await?
+                                .json()
+                                .as_bool();
+                            ensure!(is_top == Some(true), "driver stayed inside iframe");
+
+                            let marker = driver
+                                .inner
+                                .execute("return window.__recycled_marker;", Vec::new())
+                                .await?
+                                .json()
+                                .as_str()
+                                .map(str::to_owned);
+                            ensure!(
+                                marker.as_deref() == Some("kept"),
+                                "document was replaced: {marker:?}"
+                            );
+
+                            ensure!(
+                                driver.waiting.clause().is_empty(),
+                                "waiting was not cleared"
+                            );
+                            ensure!(
+                                !driver.watching.load(Ordering::Relaxed),
+                                "watching was not cleared"
+                            );
+                            ensure!(!driver.holding.take(), "holding was not cleared");
+                            let leftovers = std::fs::read_dir(driver.downloads())?.count();
+                            ensure!(leftovers == 0, "downloads were not cleared: {leftovers}");
+
+                            let rect = driver.inner.get_window_rect().await?;
+                            ensure!(
+                                (rect.width as u32, rect.height as u32) == WINDOW,
+                                "window size was not restored: {rect:?}"
+                            );
+                            Ok(())
+                        })
+                    },
+                    setup(Mode::Keep),
+                    None,
+                ),
+            )
+            .await;
+            second.result?;
+            ensure!(second.warnings.is_empty(), "unexpected warnings");
+            let kept = second
+                .fixture
+                .context("recycled pass should keep fixture")?;
+            let second_window = browser.driver.inner.window().await?;
+            ensure!(first_window == second_window, "recycle opened a new tab");
+            ensure!(starts.get() == 1 && quits.get() == 0);
+
+            let phases = timings
+                .borrow()
+                .phases
+                .iter()
+                .map(|(phase, _)| *phase)
+                .collect::<Vec<_>>();
+            ensure!(
+                phases == [Phase::FixtureRecycle, Phase::TabReset, Phase::Body],
+                "unexpected recycled phases: {phases:?}"
+            );
+
+            // 3. Declined recycle (Ok(false)): quits old, starts fresh on a new tab.
+            let third = super::run_one::<RecycleFixture>(
+                &mut browser,
+                Some(kept),
+                |driver, _| {
+                    Box::pin(async move {
+                        let marker = driver
+                            .inner
+                            .execute("return window.__recycled_marker ?? null;", Vec::new())
+                            .await?;
+                        ensure!(marker.json().is_null(), "fresh tab kept old marker");
+                        Ok(())
+                    })
+                },
+                setup(Mode::Decline),
+                None,
+            )
+            .await;
+            third.result?;
+            ensure!(third.warnings.is_empty(), "unexpected warnings");
+            let kept = third.fixture.context("passing test should keep fixture")?;
+            let third_window = browser.driver.inner.window().await?;
+            ensure!(third_window != second_window, "decline kept old tab");
+            ensure!(starts.get() == 2 && quits.get() == 1);
+
+            // 4. Errored recycle (Err): warns, quits old, starts fresh and passes.
+            let fourth = super::run_one::<RecycleFixture>(
+                &mut browser,
+                Some(kept),
+                |_, _| Box::pin(async { Ok(()) }),
+                setup(Mode::Fail),
+                None,
+            )
+            .await;
+            fourth.result?;
+            ensure!(fourth.warnings.len() == 1, "expected recycle warning");
+            let warning = format!("{:#}", fourth.warnings[0]);
+            ensure!(warning.contains("recycle-failed-marker"), "{warning}");
+            let kept = fourth.fixture.context("passing test should keep fixture")?;
+            ensure!(starts.get() == 3 && quits.get() == 2);
+
+            // 5. Failing test: quits fixture immediately and does not keep it.
+            let fifth = super::run_one::<RecycleFixture>(
+                &mut browser,
+                Some(kept),
+                |_, _| Box::pin(async { anyhow::bail!("body-failed") }),
+                setup(Mode::Keep),
+                None,
+            )
+            .await;
+            ensure!(fifth.result.is_err(), "failing test should fail");
+            ensure!(
+                fifth.fixture.is_none(),
+                "failing test must not keep fixture"
+            );
+            ensure!(starts.get() == 3 && quits.get() == 3);
+
             Ok(())
         }
         .await;

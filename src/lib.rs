@@ -146,7 +146,7 @@
 //! | `--include-ignored` | Run the tests declared `#[ignore]` as well as the rest. |
 //! | `--last-session`, `--session NAME` | Run only what did not pass in that session. |
 //! | `--timeout SECONDS` | How long one test may run. Defaults to [`Config::timeout`], else 30; 0 waits for ever. |
-//! | `--timings` | Under each test, how long each phase took (browser open, fixture start and quit, tab reset, navigation, the test itself) and its slowest waits. |
+//! | `--timings` | Under each test, how long each phase took (browser open, fixture start, recycle and quit, tab reset, navigation, the test itself) and its slowest waits. |
 //! | `--grace SECONDS` | How long a running test is given to finish after Ctrl-C or SIGTERM. |
 //! | `--lock target\|project\|none` | Which other runs this one waits for: those in the same build directory (the default), every worktree of the Git project, or none. |
 //! | `--lock-wait SECONDS` | How long to wait for that lock. |
@@ -208,7 +208,7 @@ pub use self::element::TestElement;
 pub use self::finding::{IntoBy, POLL_INTERVAL};
 pub use self::test_driver::{CanvasSize, TestDriver};
 
-pub(crate) use self::browser::{Browser, Holding, WINDOW, Waiting, overran, run_one};
+pub(crate) use self::browser::{Browser, Holding, RunOutcome, WINDOW, Waiting, overran, run_one};
 
 /// What a test file needs in scope, in one `use yew_e2e::prelude::*;`.
 ///
@@ -259,6 +259,22 @@ pub trait Fixture: Sized + 'static {
 
     /// Where the browser is pointed for this test.
     fn url(&self) -> String;
+
+    /// Reuse this fixture and the page already loaded in `driver` for the next
+    /// test, configured with `next`.
+    ///
+    /// Called on a kept fixture after a passing test when the runner keeps its
+    /// browser for another test. Returning `Ok(true)` keeps the current tab and
+    /// skips [`Fixture::start`] and navigation while still clearing per-test
+    /// runner state; returning `Ok(false)` (the default) or an error quits this
+    /// fixture and starts a fresh one on a new tab.
+    fn recycle(
+        &mut self,
+        _driver: &mut TestDriver,
+        _next: &Self::Setup,
+    ) -> impl Future<Output = Result<bool>> {
+        async { Ok(false) }
+    }
 
     /// Take the application down once its test has finished.
     fn quit(self) -> impl Future<Output = Result<()>>;

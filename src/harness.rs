@@ -697,6 +697,16 @@ fn settle(report: &RefCell<Report>, closing: Result<Option<anyhow::Error>>) -> R
     Ok(())
 }
 
+/// Take down a kept fixture whose browser is retiring, warning rather than
+/// aborting if `quit` fails.
+async fn quit_retired<F: Fixture>(report: &RefCell<Report>, fixture: F, after: &str) {
+    if let Err(error) = fixture.quit().await {
+        report
+            .borrow_mut()
+            .warn(error.context(format!("quitting the fixture {after}")));
+    }
+}
+
 /// Close a browser no failing test is waiting to be told about.
 ///
 /// The tests it ran have already been recorded, and the run is not stopped on
@@ -716,13 +726,15 @@ pub(crate) trait Seat: Sized {
     /// What the test running in it last asked to wait for.
     fn waiting(&self) -> crate::Waiting;
 
-    /// Run one test in it.
+    /// Run one test in it, optionally reusing `kept` from the previous passing
+    /// test.
     async fn run<F: Fixture>(
         &mut self,
+        kept: Option<F>,
         start: Start<F>,
         setup: F::Setup,
         limit: Option<Duration>,
-    ) -> Result<()>;
+    ) -> crate::RunOutcome<F>;
 
     /// Take it down; see [`crate::Browser::close`].
     async fn close(self) -> Result<Option<anyhow::Error>>;
@@ -735,11 +747,12 @@ impl Seat for crate::Browser {
 
     async fn run<F: Fixture>(
         &mut self,
+        kept: Option<F>,
         start: Start<F>,
         setup: F::Setup,
         limit: Option<Duration>,
-    ) -> Result<()> {
-        crate::run_one(self, start, setup, limit).await
+    ) -> crate::RunOutcome<F> {
+        crate::run_one(self, kept, start, setup, limit).await
     }
 
     async fn close(self) -> Result<Option<anyhow::Error>> {
@@ -772,7 +785,7 @@ async fn worker_with<F: Fixture, B: Seat, O: std::future::Future<Output = Result
     limit: Option<Duration>,
     mut open_browser: impl FnMut() -> O,
 ) -> Result<()> {
-    let mut browser = None;
+    let mut browser: Option<(B, Option<F>)> = None;
     let mut used = 0usize;
 
     while !cancel.stopped() {
@@ -787,8 +800,8 @@ async fn worker_with<F: Fixture, B: Seat, O: std::future::Future<Output = Result
         // included; nothing is measured without it.
         let timings = timings().then(|| Rc::new(RefCell::new(crate::timings::Timings::default())));
 
-        let mut open = match browser.take() {
-            Some(browser) => browser,
+        let (mut open, kept) = match browser.take() {
+            Some(live) => live,
             None => {
                 used = 0;
                 let opening = crate::timings::within(timings.as_ref(), open_browser());
@@ -800,7 +813,7 @@ async fn worker_with<F: Fixture, B: Seat, O: std::future::Future<Output = Result
                     result = opening => Some(result),
                     () = stopped => None,
                 } {
-                    Some(Ok(browser)) => browser,
+                    Some(Ok(browser)) => (browser, None),
                     Some(Err(error)) => {
                         report.borrow_mut().record(
                             name,
@@ -827,56 +840,80 @@ async fn worker_with<F: Fixture, B: Seat, O: std::future::Future<Output = Result
         let began = Instant::now();
 
         let running = async {
-            let running = crate::timings::within(timings.as_ref(), open.run(start, setup, limit));
+            let running =
+                crate::timings::within(timings.as_ref(), open.run(kept, start, setup, limit));
 
             let Some(limit) = limit else {
                 return running.await;
             };
 
             match tokio::time::timeout(limit + CLEANUP_MARGIN, running).await {
-                Ok(result) => result,
-                Err(_) => Err(anyhow::anyhow!(
-                    "{}, and did not stop when it was told to",
-                    crate::overran(Some(limit), &waiting)
-                )),
+                Ok(outcome) => outcome,
+                Err(_) => crate::RunOutcome {
+                    result: Err(anyhow::anyhow!(
+                        "{}, and did not stop when it was told to",
+                        crate::overran(Some(limit), &waiting)
+                    )),
+                    fixture: None,
+                    warnings: Vec::new(),
+                },
             }
         };
 
         let finished = tokio::select! {
-            result = running => Some(result),
+            outcome = running => Some(outcome),
             () = overrun => None,
         };
 
-        let Some(mut result) = finished else {
+        let Some(mut outcome) = finished else {
             println!("test {name} ... cut short");
             retire(&report, open, "after an interrupted test").await;
             break;
         };
 
+        for warning in outcome.warnings {
+            report.borrow_mut().warn(warning);
+        }
+
         used += 1;
 
-        if result.is_err() {
+        if outcome.result.is_err() {
+            if let Some(fixture) = outcome.fixture {
+                quit_retired(&report, fixture, "after a failing test").await;
+            }
             if let Err(error) = settle(&report, open.close().await) {
                 tracing::warn!(?error, "closing the browser after a failing test");
-                result =
-                    result.map_err(|original| crate::driver::with_cleanup(original, Err(error)));
+                outcome.result = outcome
+                    .result
+                    .map_err(|original| crate::driver::with_cleanup(original, Err(error)));
             }
         } else if keeps_browser(used) {
-            browser = Some(open);
+            browser = Some((open, outcome.fixture));
         } else {
+            if let Some(fixture) = outcome.fixture {
+                quit_retired(&report, fixture, "that had run its course").await;
+            }
             retire(&report, open, "that had run its course").await;
         }
 
         report.borrow_mut().record(
             name,
-            result,
+            outcome.result,
             Some(began.elapsed()),
             timings.as_ref().map(|timings| timings.take()),
         );
     }
 
-    if let Some(browser) = browser {
-        retire(&report, browser, "after its last test").await;
+    if let Some((browser, fixture)) = browser {
+        let after = if cancel.stopped() {
+            "after an interrupt"
+        } else {
+            "after its last test"
+        };
+        if let Some(fixture) = fixture {
+            quit_retired(&report, fixture, after).await;
+        }
+        retire(&report, browser, after).await;
     }
 
     Ok(())
@@ -944,11 +981,16 @@ mod lifecycle_tests {
 
         async fn run<F: Fixture>(
             &mut self,
+            _: Option<F>,
             _: Start<F>,
             _: F::Setup,
             _: Option<Duration>,
-        ) -> Result<()> {
-            Ok(())
+        ) -> crate::RunOutcome<F> {
+            crate::RunOutcome {
+                result: Ok(()),
+                fixture: None,
+                warnings: Vec::new(),
+            }
         }
 
         async fn close(self) -> Result<Option<anyhow::Error>> {
@@ -1102,6 +1144,411 @@ mod lifecycle_tests {
         assert_eq!(queue.borrow().len(), 1);
         assert_eq!(report.borrow().session.counts(), (0, 0, 2));
         assert!(report.borrow().failures.is_empty());
+    }
+
+    #[derive(Clone, Default)]
+    struct TrackedSetup {
+        log: Rc<RefCell<Vec<String>>>,
+        next_id: Rc<Cell<usize>>,
+        fail_quit: bool,
+    }
+
+    struct Tracked {
+        id: usize,
+        log: Rc<RefCell<Vec<String>>>,
+        fail_quit: bool,
+    }
+
+    impl Fixture for Tracked {
+        type Setup = TrackedSetup;
+
+        async fn start(setup: Self::Setup) -> Result<Self> {
+            let id = setup.next_id.get() + 1;
+            setup.next_id.set(id);
+            setup.log.borrow_mut().push(format!("start:{id}"));
+            Ok(Self {
+                id,
+                log: setup.log,
+                fail_quit: setup.fail_quit,
+            })
+        }
+
+        fn url(&self) -> String {
+            format!("http://127.0.0.1/{}", self.id)
+        }
+
+        async fn quit(self) -> Result<()> {
+            self.log.borrow_mut().push(format!("quit:{}", self.id));
+            if self.fail_quit {
+                anyhow::bail!("quit-marker:{}", self.id);
+            }
+            Ok(())
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum RecycleStep {
+        Keep,
+        Decline,
+        RecycleErr(&'static str),
+    }
+
+    struct ScriptedStep {
+        recycle: RecycleStep,
+        fail_test: Option<&'static str>,
+        cancel_after: Option<Rc<Cancel>>,
+    }
+
+    struct RecycleStand {
+        steps: Rc<RefCell<VecDeque<ScriptedStep>>>,
+        closed: Rc<Cell<usize>>,
+    }
+
+    impl Seat for RecycleStand {
+        fn waiting(&self) -> crate::Waiting {
+            crate::Waiting::default()
+        }
+
+        async fn run<F: Fixture>(
+            &mut self,
+            kept: Option<F>,
+            _: Start<F>,
+            setup: F::Setup,
+            _: Option<Duration>,
+        ) -> crate::RunOutcome<F> {
+            let step = self
+                .steps
+                .borrow_mut()
+                .pop_front()
+                .expect("scripted step for test");
+
+            let mut warnings = Vec::new();
+            let mut recycled = None;
+
+            if let Some(prev) = kept {
+                match step.recycle {
+                    RecycleStep::Keep => recycled = Some(prev),
+                    RecycleStep::Decline => {
+                        if let Err(error) = prev.quit().await {
+                            warnings.push(error.context("quitting the previous fixture"));
+                        }
+                    }
+                    RecycleStep::RecycleErr(message) => {
+                        warnings.push(
+                            anyhow::anyhow!(message).context("recycling the previous fixture"),
+                        );
+                        if let Err(error) = prev.quit().await {
+                            warnings.push(error.context("quitting the previous fixture"));
+                        }
+                    }
+                }
+            }
+
+            let fixture = match recycled {
+                Some(fixture) => fixture,
+                None => match F::start(setup).await {
+                    Ok(fixture) => fixture,
+                    Err(error) => {
+                        return crate::RunOutcome {
+                            result: Err(error),
+                            fixture: None,
+                            warnings,
+                        };
+                    }
+                },
+            };
+
+            if let Some(cancel) = step.cancel_after {
+                cancel.stop();
+            }
+
+            if let Some(message) = step.fail_test {
+                let _ = fixture.quit().await;
+                return crate::RunOutcome {
+                    result: Err(anyhow::anyhow!(message)),
+                    fixture: None,
+                    warnings,
+                };
+            }
+
+            crate::RunOutcome {
+                result: Ok(()),
+                fixture: Some(fixture),
+                warnings,
+            }
+        }
+
+        async fn close(self) -> Result<Option<anyhow::Error>> {
+            self.closed.set(self.closed.get() + 1);
+            Ok(None)
+        }
+    }
+
+    type TrackedQueue = Rc<RefCell<VecDeque<Test<Tracked>>>>;
+
+    fn tracked_queue(
+        count: usize,
+        log: &Rc<RefCell<Vec<String>>>,
+        next_id: &Rc<Cell<usize>>,
+        fail_quit: bool,
+    ) -> (TrackedQueue, Rc<RefCell<Report>>) {
+        let names = (1..=count).map(|n| format!("t{n}")).collect::<Vec<_>>();
+        let report = Rc::new(RefCell::new(Report::new(sessions::Session::new(
+            names.clone(),
+        ))));
+        let queue = Rc::new(RefCell::new(
+            names
+                .into_iter()
+                .map(|name| Test {
+                    name,
+                    start: |_, _| Box::pin(async { Ok(()) }),
+                    setup: TrackedSetup {
+                        log: log.clone(),
+                        next_id: next_id.clone(),
+                        fail_quit,
+                    },
+                    ignored: None,
+                })
+                .collect(),
+        ));
+        (queue, report)
+    }
+
+    #[tokio::test]
+    async fn kept_fixture_is_reused_across_passing_tests_and_quit_at_run_end() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let next_id = Rc::new(Cell::new(0));
+        let (queue, report) = tracked_queue(3, &log, &next_id, false);
+        let steps = Rc::new(RefCell::new(VecDeque::from([
+            ScriptedStep {
+                recycle: RecycleStep::Keep,
+                fail_test: None,
+                cancel_after: None,
+            },
+            ScriptedStep {
+                recycle: RecycleStep::Keep,
+                fail_test: None,
+                cancel_after: None,
+            },
+            ScriptedStep {
+                recycle: RecycleStep::Keep,
+                fail_test: None,
+                cancel_after: None,
+            },
+        ])));
+        let opened = Rc::new(Cell::new(0));
+        let closed = Rc::new(Cell::new(0));
+
+        worker_with(
+            queue,
+            report.clone(),
+            Rc::new(Cancel::default()),
+            Duration::ZERO,
+            None,
+            || {
+                opened.set(opened.get() + 1);
+                let steps = steps.clone();
+                let closed = closed.clone();
+                async move { Ok(RecycleStand { steps, closed }) }
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(opened.get(), 1);
+        assert_eq!(closed.get(), 1);
+        assert_eq!(*log.borrow(), ["start:1", "quit:1"]);
+        let report = report.borrow();
+        assert_eq!(report.passed, 3);
+        assert!(report.failures.is_empty());
+        assert!(report.warnings.is_empty());
+    }
+
+    #[tokio::test]
+    async fn recycle_decline_and_error_fall_back_to_fresh_fixture_with_warning() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let next_id = Rc::new(Cell::new(0));
+        let (queue, report) = tracked_queue(3, &log, &next_id, false);
+        let steps = Rc::new(RefCell::new(VecDeque::from([
+            ScriptedStep {
+                recycle: RecycleStep::Keep,
+                fail_test: None,
+                cancel_after: None,
+            },
+            ScriptedStep {
+                recycle: RecycleStep::Decline,
+                fail_test: None,
+                cancel_after: None,
+            },
+            ScriptedStep {
+                recycle: RecycleStep::RecycleErr("recycle-boom"),
+                fail_test: None,
+                cancel_after: None,
+            },
+        ])));
+        let closed = Rc::new(Cell::new(0));
+
+        worker_with(
+            queue,
+            report.clone(),
+            Rc::new(Cancel::default()),
+            Duration::ZERO,
+            None,
+            || {
+                let steps = steps.clone();
+                let closed = closed.clone();
+                async move { Ok(RecycleStand { steps, closed }) }
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(closed.get(), 1);
+        assert_eq!(
+            *log.borrow(),
+            [
+                "start:1", "quit:1", "start:2", "quit:2", "start:3", "quit:3"
+            ]
+        );
+        let report = report.borrow();
+        assert_eq!(report.passed, 3);
+        assert!(report.failures.is_empty());
+        assert_eq!(report.warnings.len(), 1);
+        let warning = format!("{:#}", report.warnings[0]);
+        assert!(warning.contains("recycle-boom"), "{warning}");
+    }
+
+    #[tokio::test]
+    async fn a_failing_test_quits_its_fixture_and_starts_fresh_next() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let next_id = Rc::new(Cell::new(0));
+        let (queue, report) = tracked_queue(3, &log, &next_id, false);
+        let steps = Rc::new(RefCell::new(VecDeque::from([
+            ScriptedStep {
+                recycle: RecycleStep::Keep,
+                fail_test: None,
+                cancel_after: None,
+            },
+            ScriptedStep {
+                recycle: RecycleStep::Keep,
+                fail_test: Some("test-failed"),
+                cancel_after: None,
+            },
+            ScriptedStep {
+                recycle: RecycleStep::Keep,
+                fail_test: None,
+                cancel_after: None,
+            },
+        ])));
+        let opened = Rc::new(Cell::new(0));
+        let closed = Rc::new(Cell::new(0));
+
+        worker_with(
+            queue,
+            report.clone(),
+            Rc::new(Cancel::default()),
+            Duration::ZERO,
+            None,
+            || {
+                opened.set(opened.get() + 1);
+                let steps = steps.clone();
+                let closed = closed.clone();
+                async move { Ok(RecycleStand { steps, closed }) }
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(opened.get(), 2);
+        assert_eq!(closed.get(), 2);
+        assert_eq!(*log.borrow(), ["start:1", "quit:1", "start:2", "quit:2"]);
+        let report = report.borrow();
+        assert_eq!(report.passed, 2);
+        assert_eq!(report.failures.len(), 1);
+        assert_eq!(report.failures[0].0, "t2");
+    }
+
+    #[tokio::test]
+    async fn kept_fixture_is_quit_when_browser_retires_at_browser_life() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let next_id = Rc::new(Cell::new(0));
+        let total = BROWSER_LIFE + 1;
+        let (queue, report) = tracked_queue(total, &log, &next_id, false);
+        let steps = Rc::new(RefCell::new(
+            (0..total)
+                .map(|_| ScriptedStep {
+                    recycle: RecycleStep::Keep,
+                    fail_test: None,
+                    cancel_after: None,
+                })
+                .collect(),
+        ));
+        let opened = Rc::new(Cell::new(0));
+        let closed = Rc::new(Cell::new(0));
+
+        worker_with(
+            queue,
+            report.clone(),
+            Rc::new(Cancel::default()),
+            Duration::ZERO,
+            None,
+            || {
+                opened.set(opened.get() + 1);
+                let steps = steps.clone();
+                let closed = closed.clone();
+                async move { Ok(RecycleStand { steps, closed }) }
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(opened.get(), 2);
+        assert_eq!(closed.get(), 2);
+        assert_eq!(*log.borrow(), ["start:1", "quit:1", "start:2", "quit:2"]);
+        let report = report.borrow();
+        assert_eq!(report.passed, total);
+        assert!(report.failures.is_empty());
+        assert!(report.warnings.is_empty());
+    }
+
+    #[tokio::test]
+    async fn kept_fixture_is_quit_on_interrupt_and_failed_quit_warns() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let next_id = Rc::new(Cell::new(0));
+        let cancel = Rc::new(Cancel::default());
+        let (queue, report) = tracked_queue(2, &log, &next_id, true);
+        let steps = Rc::new(RefCell::new(VecDeque::from([ScriptedStep {
+            recycle: RecycleStep::Keep,
+            fail_test: None,
+            cancel_after: Some(cancel.clone()),
+        }])));
+        let closed = Rc::new(Cell::new(0));
+
+        worker_with(
+            queue.clone(),
+            report.clone(),
+            cancel,
+            Duration::ZERO,
+            None,
+            || {
+                let steps = steps.clone();
+                let closed = closed.clone();
+                async move { Ok(RecycleStand { steps, closed }) }
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(closed.get(), 1);
+        assert_eq!(queue.borrow().len(), 1);
+        assert_eq!(*log.borrow(), ["start:1", "quit:1"]);
+        let report = report.borrow();
+        assert_eq!(report.passed, 1);
+        assert!(report.failures.is_empty());
+        assert_eq!(report.warnings.len(), 1);
+        let warning = format!("{:#}", report.warnings[0]);
+        assert!(warning.contains("after an interrupt"), "{warning}");
+        assert!(warning.contains("quit-marker:1"), "{warning}");
     }
 }
 
