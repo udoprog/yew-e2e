@@ -182,6 +182,7 @@
 #![warn(missing_docs)]
 #![deny(rustdoc::broken_intra_doc_links)]
 
+use std::ffi::{OsStr, OsString};
 use std::future::Future;
 use std::path::PathBuf;
 
@@ -268,6 +269,7 @@ pub trait Fixture: Sized + 'static {
 pub struct Config {
     pub(crate) about: String,
     pub(crate) frontend: Frontend,
+    pub(crate) frontend_env: Vec<(OsString, OsString)>,
     pub(crate) lock: String,
     pub(crate) sessions: String,
     pub(crate) timeout: Option<u16>,
@@ -278,6 +280,7 @@ impl Default for Config {
         Self {
             about: String::from("A browser suite."),
             frontend: Frontend::Trunk(PathBuf::new()),
+            frontend_env: Vec::new(),
             lock: String::from("yew-e2e.lock"),
             sessions: String::from("e2e-sessions"),
             timeout: None,
@@ -295,6 +298,18 @@ impl Config {
     /// What the suite serves, and how it is built.
     pub fn frontend(mut self, frontend: Frontend) -> Self {
         self.frontend = frontend;
+        self
+    }
+
+    /// Set an environment variable on the frontend build tool (`trunk` or
+    /// `trug`) without changing the test runner's own environment.
+    ///
+    /// Repeat to pass several variables; a later call for the same key wins.
+    /// Ignored when [`Frontend::None`] is used or `E2E_DIST` serves a frontend
+    /// that is already built.
+    pub fn frontend_env(mut self, key: impl AsRef<OsStr>, value: impl AsRef<OsStr>) -> Self {
+        self.frontend_env
+            .push((key.as_ref().to_os_string(), value.as_ref().to_os_string()));
         self
     }
 

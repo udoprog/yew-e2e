@@ -1,5 +1,6 @@
 //! The frontend the suite serves, built by the suite rather than by hand.
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -20,7 +21,7 @@ pub fn dist() -> Result<&'static Path> {
 }
 
 /// Build the frontend, once, for the whole run.
-pub(crate) async fn build(frontend: &Frontend) -> Result<()> {
+pub(crate) async fn build(frontend: &Frontend, env: &[(OsString, OsString)]) -> Result<()> {
     if DIST.get().is_some() {
         return Ok(());
     }
@@ -29,7 +30,7 @@ pub(crate) async fn build(frontend: &Frontend) -> Result<()> {
         return Ok(());
     };
 
-    let dist = resolve(tool, dir).await?;
+    let dist = resolve(tool, dir, env).await?;
     let _ = DIST.set(dist);
     Ok(())
 }
@@ -101,7 +102,7 @@ fn is_root(dir: &Path) -> bool {
     manifest.lines().any(|line| line.trim() == "[workspace]")
 }
 
-async fn resolve(tool: &str, dir: &Path) -> Result<PathBuf> {
+async fn resolve(tool: &str, dir: &Path, env: &[(OsString, OsString)]) -> Result<PathBuf> {
     if let Some(given) = std::env::var_os("E2E_DIST") {
         let given = PathBuf::from(given);
 
@@ -122,11 +123,7 @@ async fn resolve(tool: &str, dir: &Path) -> Result<PathBuf> {
 
     println!("building the frontend into {}", dist.display());
 
-    let status = Command::new(tool)
-        .current_dir(&root)
-        .arg("build")
-        .arg("--dist")
-        .arg(&dist)
+    let status = build_command(tool, &root, &dist, env)
         .status()
         .await
         .with_context(|| format!("running `{tool} build`, is {tool} installed?"))?;
@@ -138,13 +135,29 @@ async fn resolve(tool: &str, dir: &Path) -> Result<PathBuf> {
     Ok(dist)
 }
 
+fn build_command(tool: &str, root: &Path, dist: &Path, env: &[(OsString, OsString)]) -> Command {
+    let mut command = Command::new(tool);
+    command
+        .current_dir(root)
+        .arg("build")
+        .arg("--dist")
+        .arg(dist);
+
+    for (key, value) in env {
+        command.env(key, value);
+    }
+
+    command
+}
+
 #[cfg(test)]
 mod tests {
+    use std::ffi::{OsStr, OsString};
     use std::fs;
     use std::path::{Path, PathBuf};
 
-    use super::{builder, is_root, package, search};
-    use crate::Frontend;
+    use super::{build_command, builder, is_root, package, search};
+    use crate::{Config, Frontend};
 
     /// A tree shaped like a workspace: the manifest declaring it, and a
     /// package nested under it with a manifest of its own.
@@ -245,5 +258,51 @@ mod tests {
             builder(&Frontend::Trug(dir.clone())),
             Some(("trug", dir.as_path()))
         );
+    }
+
+    /// Configured frontend environment variables are passed to the build tool
+    /// command without touching this process's own environment.
+    #[test]
+    fn frontend_env_is_applied_only_to_the_build_command() {
+        let target = PathBuf::from("/tmp/e2e-wasm");
+        let config = Config::default()
+            .frontend_env("YEW_E2E_TEST_OPT", "2")
+            .frontend_env("YEW_E2E_TEST_OPT", "s")
+            .frontend_env("YEW_E2E_TEST_TARGET", &target);
+
+        assert_eq!(std::env::var_os("YEW_E2E_TEST_OPT"), None);
+        assert_eq!(std::env::var_os("YEW_E2E_TEST_TARGET"), None);
+
+        let command = build_command(
+            "trug",
+            Path::new("/tmp/web"),
+            Path::new("/tmp/dist"),
+            &config.frontend_env,
+        );
+        let envs = command
+            .as_std()
+            .get_envs()
+            .map(|(k, v)| (k.to_owned(), v.map(OsStr::to_owned)))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            envs,
+            vec![
+                (
+                    OsString::from("YEW_E2E_TEST_OPT"),
+                    Some(OsString::from("s"))
+                ),
+                (
+                    OsString::from("YEW_E2E_TEST_TARGET"),
+                    Some(OsString::from("/tmp/e2e-wasm"))
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn empty_frontend_env_leaves_the_build_command_environment_alone() {
+        let command = build_command("trunk", Path::new("/tmp/web"), Path::new("/tmp/dist"), &[]);
+        assert_eq!(command.as_std().get_envs().count(), 0);
     }
 }

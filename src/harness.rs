@@ -355,9 +355,10 @@ impl<F: Fixture> Suite<F> {
             .build()?;
 
         let frontend = self.config.frontend;
+        let frontend_env = self.config.frontend_env;
 
         runtime.block_on(async move {
-            crate::dist::build(&frontend).await?;
+            crate::dist::build(&frontend, &frontend_env).await?;
             drive(chosen, ignored, &options, timeout).await
         })
     }
