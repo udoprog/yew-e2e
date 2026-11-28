@@ -149,6 +149,7 @@ cargo test -p app-e2e -- --last-session    # what did not pass last time
 | `--include-ignored` | Run the tests declared `#[ignore]` as well as the rest. |
 | `--last-session`, `--session NAME` | Run only what did not pass in that session. |
 | `--timeout SECONDS` | How long one test may run. Defaults to [`Config::timeout`], else 30; 0 waits for ever. |
+| `--timings` | Under each test, how long each phase took (browser open, fixture start and quit, tab reset, navigation, the test itself) and its slowest waits. |
 | `--grace SECONDS` | How long a running test is given to finish after Ctrl-C or SIGTERM. |
 | `--lock target\|project\|none` | Which other runs this one waits for: those in the same build directory (the default), every worktree of the Git project, or none. |
 | `--lock-wait SECONDS` | How long to wait for that lock. |
@@ -158,6 +159,7 @@ cargo test -p app-e2e -- --last-session    # what did not pass last time
 | `E2E_HEADED` | As `--headed`. |
 | `E2E_BROWSER` | As `--browser`. |
 | `E2E_INCLUDE_IGNORED` | As `--include-ignored`. |
+| `E2E_TIMINGS` | As `--timings`. |
 | `E2E_DIST` | A frontend that is already built, served in place of building one. |
 | `E2E_THEME` | `dark` or `light`, for the colour scheme the browser reports (Firefox). |
 | `E2E_MOTION` | `reduce` or `normal`, for the motion preference the browser reports (Firefox). |

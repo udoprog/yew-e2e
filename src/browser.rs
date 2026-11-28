@@ -15,6 +15,7 @@ use tokio::time::{self, Duration};
 
 use crate::driver::{self, Driver, QUIT_TIMEOUT, STARTUP_TIMEOUT, with_cleanup};
 use crate::finding::{LOAD_TIMEOUT, WAIT_TIMEOUT};
+use crate::timings::{Phase, phase};
 use crate::{Engine, Fixture, TestDriver};
 
 /// **What a test last asked to wait for**, in the words the test used.
@@ -87,8 +88,12 @@ impl Browser {
         let engine = crate::harness::engine();
         let deadline = time::Instant::now() + STARTUP_TIMEOUT;
         let caps = engine.capabilities(crate::harness::headed())?;
-        let webdriver = Driver::new(engine, deadline).await?;
-        Self::connect(webdriver, caps, deadline).await
+        let webdriver = phase(Phase::DriverSpawn, Driver::new(engine, deadline)).await?;
+        phase(
+            Phase::SessionCreate,
+            Self::connect(webdriver, caps, deadline),
+        )
+        .await
     }
 
     pub(crate) async fn connect(
@@ -180,14 +185,17 @@ impl Browser {
         for file in std::fs::read_dir(self.driver.downloads.path())? {
             std::fs::remove_file(file?.path())?;
         }
-        let old = self.driver.inner.window().await?;
-        let fresh = self.driver.inner.new_tab().await?;
-        self.driver.inner.switch_to_window(fresh.clone()).await?;
-        self.driver.inner.switch_to_window(old).await?;
-        self.driver.inner.close_window().await?;
-        self.driver.inner.switch_to_window(fresh).await?;
-        self.driver.set_window_size(WINDOW.0, WINDOW.1).await?;
-        self.driver.inner.goto(url).await?;
+        phase(Phase::TabReset, async {
+            let old = self.driver.inner.window().await?;
+            let fresh = self.driver.inner.new_tab().await?;
+            self.driver.inner.switch_to_window(fresh.clone()).await?;
+            self.driver.inner.switch_to_window(old).await?;
+            self.driver.inner.close_window().await?;
+            self.driver.inner.switch_to_window(fresh).await?;
+            self.driver.set_window_size(WINDOW.0, WINDOW.1).await
+        })
+        .await?;
+        phase(Phase::Goto, self.driver.inner.goto(url)).await?;
         Ok(())
     }
 
@@ -302,16 +310,16 @@ pub(crate) async fn run_one<F: Fixture>(
     setup: F::Setup,
     limit: Option<Duration>,
 ) -> Result<()> {
-    let mut fixture = F::start(setup).await?;
+    let mut fixture = phase(Phase::FixtureStart, F::start(setup)).await?;
 
     let mut errors = String::new();
 
     let result = match browser.reset(&fixture.url()).await {
-        Ok(()) => drive_one(browser, &mut fixture, start, limit).await,
+        Ok(()) => phase(Phase::Body, drive_one(browser, &mut fixture, start, limit)).await,
         Err(error) => Err(error),
     };
 
-    let fixture_result = fixture.quit().await;
+    let fixture_result = phase(Phase::FixtureQuit, fixture.quit()).await;
 
     if let Err(error) = result.as_ref() {
         if let Some(mark) = browser_death(error) {

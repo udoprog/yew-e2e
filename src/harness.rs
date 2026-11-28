@@ -27,6 +27,9 @@ pub type Start<F> = for<'a> fn(&'a mut crate::TestDriver, &'a mut F) -> TestFutu
 /// Whether the browser is drawn where somebody can watch it.
 static HEADED: OnceLock<bool> = OnceLock::new();
 
+/// Whether each test's report says where its time went.
+static TIMINGS: OnceLock<bool> = OnceLock::new();
+
 /// Which browser this run drives, decided once for the same reason.
 static ENGINE: OnceLock<Engine> = OnceLock::new();
 
@@ -35,6 +38,15 @@ pub(crate) fn headed() -> bool {
     match HEADED.get() {
         Some(&headed) => headed,
         None => switch_from(false, std::env::var_os("E2E_HEADED").as_deref()),
+    }
+}
+
+/// Whether this run reports each test's timings, as `--timings` and
+/// `E2E_TIMINGS` say.
+fn timings() -> bool {
+    match TIMINGS.get() {
+        Some(&timings) => timings,
+        None => switch_from(false, std::env::var_os("E2E_TIMINGS").as_deref()),
     }
 }
 
@@ -177,7 +189,7 @@ impl<F: Fixture> Suite<F> {
                 "{}\n\n\
                  Also read: E2E_HEADED, which --headed overrides, E2E_BROWSER, which \
                  --browser overrides, E2E_INCLUDE_IGNORED, which --include-ignored \
-                 overrides, E2E_DIST to serve a frontend that is already built \
+                 overrides, E2E_TIMINGS, which --timings overrides, E2E_DIST to serve a frontend that is already built \
                  rather than building one, E2E_THEME, E2E_MOTION and E2E_SCALE for what \
                  the browser reports, E2E_SHOTS for where snapshots go, and the usual \
                  RUST_LOG.",
@@ -327,6 +339,10 @@ impl<F: Fixture> Suite<F> {
         _ = HEADED.set(switch_from(
             options.headed,
             std::env::var_os("E2E_HEADED").as_deref(),
+        ));
+        _ = TIMINGS.set(switch_from(
+            options.timings,
+            std::env::var_os("E2E_TIMINGS").as_deref(),
         ));
         _ = ENGINE.set(engine);
         F::init_tracing();
@@ -630,7 +646,17 @@ impl Report {
     /// barely notices one beside it; a test that spends its time restarting a
     /// server does. Read a reading against others from the same run, not
     /// against a remembered number.
-    fn record(&mut self, name: String, result: Result<()>, took: Option<Duration>) {
+    ///
+    /// **Under `--timings`, `timings` follows the test's line**: where its
+    /// time went. It is said here, with the line, rather than as it is
+    /// measured, so that tests running side by side do not interleave.
+    fn record(
+        &mut self,
+        name: String,
+        result: Result<()>,
+        took: Option<Duration>,
+        timings: Option<crate::timings::Timings>,
+    ) {
         let seconds = took.map(|took| took.as_secs_f64());
 
         match result {
@@ -645,6 +671,10 @@ impl Report {
                 println!("test {name} ... FAILED");
                 self.failures.push((name, error));
             }
+        }
+
+        if let Some(timings) = timings {
+            print!("{}", crate::timings::render(&timings));
         }
     }
 
@@ -752,11 +782,15 @@ async fn worker_with<F: Fixture, B: Seat, O: std::future::Future<Output = Result
             break;
         };
 
+        // What this test measures under --timings, the browser it opens
+        // included; nothing is measured without it.
+        let timings = timings().then(|| Rc::new(RefCell::new(crate::timings::Timings::default())));
+
         let mut open = match browser.take() {
             Some(browser) => browser,
             None => {
                 used = 0;
-                let opening = open_browser();
+                let opening = crate::timings::within(timings.as_ref(), open_browser());
                 let stopped = async {
                     cancel.wait().await;
                     tokio::time::sleep(grace).await;
@@ -767,7 +801,12 @@ async fn worker_with<F: Fixture, B: Seat, O: std::future::Future<Output = Result
                 } {
                     Some(Ok(browser)) => browser,
                     Some(Err(error)) => {
-                        report.borrow_mut().record(name, Err(error), None);
+                        report.borrow_mut().record(
+                            name,
+                            Err(error),
+                            None,
+                            timings.as_ref().map(|timings| timings.take()),
+                        );
                         continue;
                     }
                     None => {
@@ -787,7 +826,7 @@ async fn worker_with<F: Fixture, B: Seat, O: std::future::Future<Output = Result
         let began = Instant::now();
 
         let running = async {
-            let running = open.run(start, setup, limit);
+            let running = crate::timings::within(timings.as_ref(), open.run(start, setup, limit));
 
             let Some(limit) = limit else {
                 return running.await;
@@ -827,9 +866,12 @@ async fn worker_with<F: Fixture, B: Seat, O: std::future::Future<Output = Result
             retire(&report, open, "that had run its course").await;
         }
 
-        report
-            .borrow_mut()
-            .record(name, result, Some(began.elapsed()));
+        report.borrow_mut().record(
+            name,
+            result,
+            Some(began.elapsed()),
+            timings.as_ref().map(|timings| timings.take()),
+        );
     }
 
     if let Some(browser) = browser {
@@ -994,7 +1036,9 @@ mod lifecycle_tests {
     #[test]
     fn a_slow_quit_after_passing_tests_is_a_warning() {
         let report = report();
-        report.borrow_mut().record("first".to_owned(), Ok(()), None);
+        report
+            .borrow_mut()
+            .record("first".to_owned(), Ok(()), None, None);
         let slow = anyhow::Error::from(crate::driver::TimedOut("quit".to_owned()))
             .context("browser quit: geckodriver");
         settle(&report, Ok(Some(slow))).unwrap();
@@ -1011,6 +1055,7 @@ mod lifecycle_tests {
         report.borrow_mut().record(
             "first".to_owned(),
             Err(anyhow::anyhow!("test-marker")),
+            None,
             None,
         );
         let slow = anyhow::Error::from(crate::driver::TimedOut("quit".to_owned()));
@@ -1466,6 +1511,11 @@ struct Options {
     #[arg(long)]
     include_ignored: bool,
 
+    /// Say under each test where its time went: opening the browser, the
+    /// fixture, the tab, the test itself, and its slowest waits.
+    #[arg(long)]
+    timings: bool,
+
     /// How long to wait for another runner holding the same lock to finish.
     /// Zero waits for ever.
     #[arg(long, value_name = "SECONDS", default_value_t = DEFAULT_LOCK_WAIT)]
@@ -1722,7 +1772,9 @@ macro_rules! __harness_ignore {
 mod tests {
     use std::ffi::OsStr;
 
-    use super::{switch_from, timeout_from};
+    use clap::Parser;
+
+    use super::{Options, switch_from, timeout_from};
 
     /// **`E2E_HEADED` still applies when `--headed` is absent**, and the flag
     /// shows the browser whatever the variable says.
@@ -1737,6 +1789,22 @@ mod tests {
             assert!(!switch_from(false, Some(OsStr::new(off))));
             assert!(switch_from(true, Some(OsStr::new(off))));
         }
+    }
+
+    /// **`--timings` is off unless asked for**, and `E2E_TIMINGS` asks for it
+    /// as `E2E_HEADED` asks for `--headed`.
+    #[test]
+    fn timings_are_asked_for_by_the_flag_or_the_variable() {
+        let off = Options::parse_from(["e2e"]);
+        assert!(!off.timings);
+        assert!(!switch_from(off.timings, None));
+        assert!(switch_from(off.timings, Some(OsStr::new("1"))));
+        assert!(!switch_from(off.timings, Some(OsStr::new("0"))));
+
+        let on = Options::parse_from(["e2e", "--timings", "waits::"]);
+        assert!(on.timings);
+        assert_eq!(on.filters, ["waits::"]);
+        assert!(switch_from(on.timings, Some(OsStr::new("false"))));
     }
 
     /// **`--timeout` wins over the suite's own default**, which wins over 30.

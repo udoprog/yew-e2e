@@ -110,10 +110,15 @@ pub(crate) async fn poll<T>(
     let deadline = DEADLINE.try_with(|outer| own.min(*outer)).unwrap_or(own);
 
     let mut stale = None;
+    // Only `--timings` reads these, so a run without it formats nothing.
+    let began = crate::timings::active().then(Instant::now);
+    let mut attempts = 0usize;
 
     let found = DEADLINE
         .scope(deadline, async {
             loop {
+                attempts += 1;
+
                 match attempt().await {
                     Ok(Some(found)) => return Ok(Some(found)),
                     Ok(None) => {}
@@ -136,9 +141,21 @@ pub(crate) async fn poll<T>(
         .await?;
 
     match found {
-        Some(found) => Ok(found),
+        Some(found) => {
+            if let Some(began) = began {
+                crate::timings::wait(began.elapsed(), attempts, true, waited());
+            }
+
+            Ok(found)
+        }
         None => {
-            let error = anyhow::Error::from(OutOfTime(waited()));
+            let said = waited();
+
+            if let Some(began) = began {
+                crate::timings::wait(began.elapsed(), attempts, false, said.clone());
+            }
+
+            let error = anyhow::Error::from(OutOfTime(said));
 
             Err(match stale {
                 Some(stale) => {
@@ -784,5 +801,71 @@ mod tests {
         assert!(is_stale(&stale().context("reading the row")));
         assert!(!is_stale(&anyhow!("stale element reference")));
         assert!(!is_stale(&OutOfTime(String::from("late")).into()));
+    }
+
+    /// **Under `--timings` a wait is counted**: how long it took, how many
+    /// looks, and what it waited for, without the timeout it never reached;
+    /// one that ran out keeps its words. Without a collector nothing is asked
+    /// of `waited` for an answered wait at all.
+    #[tokio::test(start_paused = true)]
+    async fn a_wait_is_counted_only_while_timings_are_collected() -> Result<()> {
+        let timings = std::rc::Rc::new(std::cell::RefCell::new(crate::timings::Timings::default()));
+
+        crate::timings::within(Some(&timings), async {
+            let mut looks = 0;
+            poll(
+                Duration::from_secs(5),
+                || String::from("Timed out after 5s waiting for #ready"),
+                async || {
+                    looks += 1;
+                    Ok((looks == 4).then_some(()))
+                },
+            )
+            .await?;
+
+            let missed = poll(
+                Duration::from_millis(100),
+                || String::from("Timed out after 100ms waiting for #never"),
+                async || Ok(None::<()>),
+            )
+            .await;
+            ensure_err(missed)
+        })
+        .await?;
+
+        {
+            let timings = timings.borrow();
+            let [ready, never] = timings.waits.as_slice() else {
+                bail!("expected two waits: {:?}", timings.waits);
+            };
+            assert_eq!(ready.what, "waiting for #ready");
+            assert_eq!(ready.attempts, 4);
+            assert_eq!(ready.took, POLL * 3);
+            assert_eq!(never.what, "Timed out after 100ms waiting for #never");
+            assert_eq!(never.took, Duration::from_millis(100));
+        }
+
+        let asked = std::cell::Cell::new(false);
+        poll(
+            Duration::from_secs(5),
+            || {
+                asked.set(true);
+                String::from("unasked")
+            },
+            async || Ok(Some(())),
+        )
+        .await?;
+        assert!(!asked.get(), "an answered wait formatted its words untimed");
+        assert_eq!(timings.borrow().waits.len(), 2);
+        Ok(())
+    }
+
+    const POLL: Duration = super::POLL_INTERVAL;
+
+    fn ensure_err(result: Result<()>) -> Result<()> {
+        match result {
+            Ok(()) => bail!("a poll that never answers answered"),
+            Err(_) => Ok(()),
+        }
     }
 }
